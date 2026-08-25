@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""
+lecture_generator.py
+
+Universal Multi-Book Pedagogical Audio Lecture Generation Engine.
+Transforms any textbook (.pdf / .md / .txt) into modular, unhurried, 
+conversational audio masterclasses adhering to cognitive load theory,
+distributed active recall, and GraphRAG knowledge graph retrieval.
+
+Defaults:
+- Voice: Nigerian English Neural Voice (en-NG-AbeoNeural / en-NG-EzinneNeural)
+- Speed: 100-110 Words Per Minute (rate: -18%)
+- Architecture: Uncompressed masterclass with modular study break checkpoints
+"""
+
+import os
+import re
+import wave
+import json
+import io
+import asyncio
+import argparse
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+from pydub import AudioSegment
+
+
+# ============================================================================
+# 1. BOOK CATALOG & METADATA
+# ============================================================================
+
+class BookMetadata:
+    def __init__(self, book_path: Path, config_data: Optional[Dict] = None):
+        self.book_path = book_path
+        self.config_data = config_data or {}
+        
+        # Derive slug
+        if self.config_data.get("short_slug"):
+            self.slug = self.config_data["short_slug"]
+        elif book_path.is_dir():
+            self.slug = book_path.name
+        else:
+            self.slug = re.sub(r"[^a-zA-Z0-9_]+", "_", book_path.stem).strip("_").lower()
+
+        # Derive title
+        if self.config_data.get("book_title"):
+            self.title = self.config_data["book_title"]
+        else:
+            self.title = book_path.stem.replace("_", " ").title()
+
+        self.exam_body = self.config_data.get("exam_body", "Professional & Academic Examination")
+        self.target_audience = self.config_data.get("target_audience", "Students and Examination Candidates")
+        self.default_voice = self.config_data.get("default_voice", "en-NG-AbeoNeural")
+        self.default_rate = self.config_data.get("default_rate", "-18%")
+
+
+def resolve_book(book_arg: Optional[str]) -> Tuple[Path, BookMetadata]:
+    """Resolves a book argument into a file path and metadata."""
+    books_dir = Path("books")
+    
+    # 1. Check if argument is a path to a file or directory
+    if book_arg:
+        target = Path(book_arg)
+        if target.exists():
+            if target.is_dir():
+                cfg_file = target / "book_config.json"
+                cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
+                # Look for book.md or book.pdf
+                for candidate in ["book.md", "book.pdf", "book.txt"]:
+                    if (target / candidate).exists():
+                        return target / candidate, BookMetadata(target / candidate, cfg)
+                # Look for any .md or .pdf in the dir
+                for candidate in target.glob("*.md"):
+                    return candidate, BookMetadata(candidate, cfg)
+                for candidate in target.glob("*.pdf"):
+                    return candidate, BookMetadata(candidate, cfg)
+            else:
+                cfg_file = target.parent / "book_config.json"
+                cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
+                return target, BookMetadata(target, cfg)
+        
+        # Check inside books/ directory by slug
+        if (books_dir / book_arg).exists():
+            return resolve_book(str(books_dir / book_arg))
+
+    # 2. Default fallback: search books/ directory or workspace root
+    if books_dir.exists():
+        for b_dir in books_dir.iterdir():
+            if b_dir.is_dir():
+                return resolve_book(str(b_dir))
+
+    # 3. Fallback to any markdown or PDF in workspace
+    for p in Path(".").glob("*.md"):
+        if "deep-research" not in p.name.lower() and "transcript" not in p.name.lower():
+            return p, BookMetadata(p)
+            
+    raise FileNotFoundError(f"Could not find book matching '{book_arg}'. Check your path or books/ directory.")
+
+
+# ============================================================================
+# 2. UNIVERSAL BOOK PARSER (.MD & .PDF)
+# ============================================================================
+
+class UniversalBookParser:
+    """Extracts text and parses chapters from Markdown, PDF, and Text files."""
+
+    @staticmethod
+    def extract_full_text(file_path: Path) -> str:
+        """Extracts complete text content from .md, .txt, or .pdf."""
+        suffix = file_path.suffix.lower()
+        if suffix in [".md", ".txt"]:
+            return file_path.read_text(encoding="utf-8")
+        elif suffix == ".pdf":
+            import pypdf
+            reader = pypdf.PdfReader(str(file_path))
+            pages_text = []
+            for idx, page in enumerate(reader.pages):
+                txt = page.extract_text() or ""
+                pages_text.append(txt)
+            return "\n\n".join(pages_text)
+        else:
+            raise ValueError(f"Unsupported book format: {suffix}. Supported: .md, .txt, .pdf")
+
+    @classmethod
+    def parse_chapters(cls, file_path: Path) -> List[Dict]:
+        """
+        Heuristically discovers and segments all chapters in a book.
+        Supports standard patterns:
+        - CHAPTER 1 / Chapter 1: <Title>
+        - MODULE 1 / Unit 1 / Section 1
+        - Roman numerals (CHAPTER I, Chapter IV)
+        """
+        full_text = cls.extract_full_text(file_path)
+        
+        # Regex patterns to detect chapter start boundaries
+        patterns = [
+            # Pattern A: ### **CHAPTER 1** or ## **CHAPTER 1** or # CHAPTER 1
+            r"(?:^|\n)(?:#{1,4}\s+)?\*{0,2}(?:CHAPTER|Chapter|MODULE|Module|UNIT|Unit|SECTION|Section)\s+([0-9IVXLCDM]+)\b[\:\.\*\s\-]*(.*?)(?=\n)",
+        ]
+
+        matches = []
+        for pat in patterns:
+            for m in re.finditer(pat, full_text):
+                matches.append(m)
+
+        # Remove duplicate matches at identical character positions
+        unique_matches = []
+        seen_pos = set()
+        for m in matches:
+            if m.start() not in seen_pos:
+                seen_pos.add(m.start())
+                unique_matches.append(m)
+        
+        unique_matches.sort(key=lambda x: x.start())
+
+        raw_chapters = []
+        if unique_matches:
+            for idx, match in enumerate(unique_matches):
+                ch_num_raw = match.group(1).strip()
+                ch_title = match.group(2).strip(" *#:-")
+                
+                # Convert Roman numeral or string to int if possible
+                try:
+                    ch_num = int(ch_num_raw)
+                except ValueError:
+                    roman_map = {'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7, 'VIII': 8, 'IX': 9, 'X': 10, 'XI': 11, 'XII': 12, 'XIII': 13, 'XIV': 14, 'XV': 15, 'XVI': 16, 'XVII': 17, 'XVIII': 18, 'XIX': 19, 'XX': 20}
+                    ch_num = roman_map.get(ch_num_raw.upper(), idx + 1)
+
+                start_pos = match.start()
+                end_pos = unique_matches[idx + 1].start() if idx + 1 < len(unique_matches) else len(full_text)
+                ch_text = full_text[start_pos:end_pos].strip()
+
+                if not ch_title or "...." in ch_title:
+                    # Look ahead on next line for a potential title heading
+                    lines = ch_text.splitlines()
+                    for line in lines[1:5]:
+                        clean_l = line.strip(" *#:-_")
+                        if clean_l and not clean_l.lower().startswith("learning objectives") and "...." not in clean_l:
+                            ch_title = clean_l
+                            break
+                    if not ch_title or "...." in ch_title:
+                        ch_title = f"Chapter {ch_num}"
+
+                raw_chapters.append({
+                    "number": ch_num,
+                    "title": ch_title,
+                    "text": ch_text,
+                    "word_count": len(ch_text.split()),
+                    "char_count": len(ch_text)
+                })
+
+        # Filter out Table of Contents duplicates (keep the substantive chapters)
+        chapters = []
+        seen_nums = {}
+        for ch in raw_chapters:
+            num = ch["number"]
+            # If we've seen this number, keep whichever has higher word count (actual chapter vs TOC)
+            if num in seen_nums:
+                existing_idx = seen_nums[num]
+                if ch["word_count"] > chapters[existing_idx]["word_count"]:
+                    chapters[existing_idx] = ch
+            else:
+                if ch["word_count"] > 300 or len(raw_chapters) == 1:
+                    seen_nums[num] = len(chapters)
+                    chapters.append(ch)
+
+        # Sort chapters by number
+        chapters.sort(key=lambda x: x["number"])
+        return chapters
+
+    @classmethod
+    def get_chapter(cls, file_path: Path, chapter_num: int) -> Dict:
+        """Retrieves a specific chapter by number."""
+        chapters = cls.parse_chapters(file_path)
+        for ch in chapters:
+            if ch["number"] == chapter_num:
+                return ch
+        raise ValueError(f"Chapter {chapter_num} not found in {file_path}. (Available: {[c['number'] for c in chapters]})")
+
+
+# ============================================================================
+# 3. GRAPHRAG KNOWLEDGE GRAPH RETRIEVAL
+# ============================================================================
+
+def retrieve_graph_context(chapter_num: int, book_slug: str = "", graph_path: str = "graphify-out/graph.json") -> dict:
+    """
+    Queries the Graphify knowledge graph for deep structural connections,
+    prerequisites from prior chapters, previews for upcoming chapters,
+    and active hyperedges to inject into the audio lecture generation.
+    """
+    g_file = Path(graph_path)
+    if not g_file.exists():
+        return {"nodes": [], "relationships": [], "hyperedges": [], "summary": "No knowledge graph found."}
+
+    data = json.loads(g_file.read_text(encoding="utf-8"))
+    nodes_data = {n["id"]: n for n in data.get("nodes", [])}
+    links = data.get("links", [])
+    hyperedges = data.get("hyperedges", [])
+
+    c_str = f"chapter_{chapter_num}"
+    c_label = f"Chapter {chapter_num}"
+    
+    chapter_node_ids = set()
+    for nid, ndata in nodes_data.items():
+        lbl = ndata.get("label", "")
+        if c_str in nid.lower() or c_label.lower() in lbl.lower():
+            chapter_node_ids.add(nid)
+
+    # 1-hop subgraph relationships
+    relationships = []
+    prerequisites = []
+    previews = []
+
+    for link in links:
+        u = link.get("source")
+        v = link.get("target")
+        if u in chapter_node_ids or v in chapter_node_ids:
+            u_lbl = nodes_data.get(u, {}).get("label", u)
+            v_lbl = nodes_data.get(v, {}).get("label", v)
+            rel = link.get("relation", "relates_to")
+            conf = link.get("confidence", "EXTRACTED")
+            
+            rel_str = f"{u_lbl} --[{rel} ({conf})]--> {v_lbl}"
+            relationships.append(rel_str)
+            
+            for ch_prev in range(1, chapter_num):
+                if f"chapter_{ch_prev}" in u.lower() or f"Chapter {ch_prev}" in u_lbl:
+                    prerequisites.append(f"Chapter {ch_prev} Concept: {u_lbl}")
+                elif f"chapter_{ch_prev}" in v.lower() or f"Chapter {ch_prev}" in v_lbl:
+                    prerequisites.append(f"Chapter {ch_prev} Concept: {v_lbl}")
+
+            for ch_next in range(chapter_num + 1, 20):
+                if f"chapter_{ch_next}" in u.lower() or f"Chapter {ch_next}" in u_lbl:
+                    previews.append(f"Future Chapter {ch_next} Preview: {u_lbl}")
+                elif f"chapter_{ch_next}" in v.lower() or f"Chapter {ch_next}" in v_lbl:
+                    previews.append(f"Future Chapter {ch_next} Preview: {v_lbl}")
+
+    active_hyperedges = []
+    for h in hyperedges:
+        h_nodes = h.get("nodes", [])
+        if any(hn in chapter_node_ids for hn in h_nodes):
+            active_hyperedges.append(f"{h.get('label', h.get('id'))}: {', '.join([nodes_data.get(n, {}).get('label', n) for n in h_nodes])}")
+
+    entities = []
+    for nid in chapter_node_ids:
+        nd = nodes_data.get(nid, {})
+        lbl = nd.get("label", nid)
+        rat = nd.get("rationale", "")
+        rat_info = f" (Exam Rationale: {rat})" if rat else ""
+        entities.append(f"{lbl}{rat_info}")
+
+    return {
+        "entities": entities[:30],
+        "relationships": relationships[:25],
+        "prerequisites": list(set(prerequisites))[:8],
+        "previews": list(set(previews))[:8],
+        "active_hyperedges": active_hyperedges[:5]
+    }
+
+
+def validate_script_against_graph(script: dict, graph_context: dict) -> dict:
+    """Validates that key graph entities are covered in the generated audio script."""
+    all_script_text = " ".join([s.get("text", "") for s in script.get("segments", []) if s.get("type") == "speech"]).lower()
+    
+    covered = []
+    missing = []
+    
+    for entity in graph_context.get("entities", []):
+        base_name = re.sub(r"\(.*?\)", "", entity).strip().lower()
+        if len(base_name) > 3 and (base_name in all_script_text or any(w in all_script_text for w in base_name.split() if len(w) > 4)):
+            covered.append(entity)
+        else:
+            missing.append(entity)
+
+    coverage_pct = (len(covered) / max(1, len(covered) + len(missing))) * 100
+    return {
+        "coverage_pct": round(coverage_pct, 1),
+        "covered_count": len(covered),
+        "missing_count": len(missing),
+        "covered_sample": covered[:6],
+        "missing_sample": missing[:6]
+    }
+
+
+# ============================================================================
+# 4. MASTERCLASS SCRIPT GENERATOR
+# ============================================================================
+
+def get_gemini_client():
+    from google import genai
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable is not set. Please export GEMINI_API_KEY='your_api_key'")
+    return genai.Client(api_key=api_key)
+
+
+def generate_pedagogical_script_gemini(
+    client, 
+    chapter_data: Dict, 
+    metadata: BookMetadata, 
+    target_duration_mins: int = 30, 
+    graph_context: Optional[dict] = None
+) -> dict:
+    """
+    Transforms dense academic text into an unhurried, conversational spoken script
+    adhering to the Uncompressed Masterclass Architecture.
+    """
+    from google.genai import types
+
+    graph_section = ""
+    if graph_context and graph_context.get("entities"):
+        entities_str = "\n".join([f"   * {e}" for e in graph_context.get("entities", [])])
+        relations_str = "\n".join([f"   * {r}" for r in graph_context.get("relationships", [])[:15]])
+        prereq_str = "\n".join([f"   * {p}" for p in graph_context.get("prerequisites", [])]) if graph_context.get("prerequisites") else "   * None (Foundational chapter)"
+        preview_str = "\n".join([f"   * {p}" for p in graph_context.get("previews", [])]) if graph_context.get("previews") else "   * General upcoming topics"
+
+        graph_section = f"""
+KNOWLEDGE GRAPH CONTEXT (Syllabus Connections):
+- Key Entities & Exam Rationales to explicitly cover:
+{entities_str}
+- Prior Chapter Prerequisites (use for quick active-recall callbacks):
+{prereq_str}
+- Upcoming Chapter Previews (use for forward signposting):
+{preview_str}
+- Inferred & Structural Relationships:
+{relations_str}
+"""
+
+    system_instruction = f"""
+You are an award-winning educational lecturer and masterclass podcaster transforming the professional textbook '{metadata.title}' (Target Audience: {metadata.target_audience}, Examining Body: {metadata.exam_body}) into an engaging, unhurried, high-yield audio masterclass.
+
+Your goal is to produce an audio script that strictly follows the Uncompressed Masterclass Architecture:
+
+1. STRUCTURE & HOOK:
+   - Begin with a vivid, relatable workplace scenario or thought experiment that establishes immediate stakes.
+   - Clearly state the Learning Objectives up front ("By the end of this session, you'll be able to...").
+   - Frame the overarching philosophical question of the chapter.
+
+2. UNCOMPRESSED TIERED-DEPTH PEDAGOGY:
+   - Never artificially compress or rush through examinable concepts.
+   - Explain difficult, nuanced, or examinable concepts deeply with concrete scenarios and why-it-works logic.
+   - Compress obvious lists efficiently without omitting any syllabus terms.
+   - Adopt a conversational spoken-word style (short punchy sentences, contractions like 'you're', 'let's', second-person 'you' and 'we').
+
+3. DISTRIBUTED ACTIVE RECALL & RETRIEVAL PRACTICE:
+   - Intersperse active-recall questions throughout the lecture (every 3–5 minutes).
+   - After each question, insert an explicit pause block (duration_seconds: 4) before revealing the model answer.
+
+4. MODULAR STUDY BREAK CHECKPOINTS:
+   - For long comprehensive sessions, embed 2 to 3 Modular Study Break Checkpoints (e.g. Study Break Checkpoint 1, 2, 3).
+   - At each checkpoint, provide a natural transition inviting the listener to pause, review notes, or continue, followed by a 5-second pause block.
+
+5. MENTAL IMAGERY FOR ABSTRACT MODELS:
+   - For abstract structures, networks, or diagrams where the listener cannot see a visual aid, provide vivid mental pictures (e.g. bicycle wheel hub/spokes, relay runners).
+
+6. CASE STUDY & EXAM REVIEW INTEGRATION:
+   - If the chapter contains official case studies (e.g. Mr. Agbeloba cashew farmer scenario), walk through the scenario, the official questions, and full exam justifications.
+   - Walk through chapter multiple-choice questions (MCQs) and review questions, explaining common exam traps.
+
+7. THREE-LAYER FINAL CONSOLIDATION:
+   - Layer 1: Rapid 5-point synthesis.
+   - Layer 2: High-yield exam distinctions ("Don't confuse X with Y").
+   - Layer 3: Spaced-recall prompt and forward bridge into the next chapter.
+
+{graph_section}
+
+OUTPUT FORMAT:
+Output MUST be a valid JSON object matching this schema:
+{{
+  "title": "{metadata.title} - Chapter {chapter_data['number']}: {chapter_data['title']}",
+  "chapter_number": {chapter_data['number']},
+  "estimated_duration_mins": {target_duration_mins},
+  "segments": [
+    {{
+      "type": "speech",
+      "text": "Spoken text here...",
+      "section_label": "Intro / Objective / Concept 1 / etc."
+    }},
+    {{
+      "type": "pause",
+      "duration_seconds": 4,
+      "purpose": "reflection on quiz question"
+    }}
+  ]
+}}
+DO NOT include markdown fences around the JSON, just pure JSON.
+"""
+
+    prompt = f"""
+Please convert the following complete chapter text from '{metadata.title}' into an in-depth pedagogical audio masterclass script:
+
+--- CHAPTER {chapter_data['number']}: {chapter_data['title']} START ---
+{chapter_data['text'][:25000]}
+--- CHAPTER END ---
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[system_instruction, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.7
+        )
+    )
+
+    text_resp = response.text.strip()
+    if text_resp.startswith("```json"):
+        text_resp = text_resp[7:]
+    if text_resp.endswith("```"):
+        text_resp = text_resp[:-3]
+
+    return json.loads(text_resp)
+
+
+# ============================================================================
+# 5. SPEECH SYNTHESIS ENGINE
+# ============================================================================
+
+def synthesize_speech_gemini(client, text: str, voice_name: str = "Puck") -> AudioSegment:
+    """Synthesizes text using Gemini native TTS."""
+    from google.genai import types
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-preview-tts",
+        contents=text,
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice_name
+                    )
+                )
+            )
+        )
+    )
+
+    pcm_data = None
+    for part in response.candidates[0].content.parts:
+        if part.inline_data:
+            pcm_data = part.inline_data.data
+            break
+
+    if not pcm_data:
+        raise RuntimeError("No audio data returned by Gemini TTS")
+
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(24000)
+        wav_file.writeframes(pcm_data)
+
+    wav_io.seek(0)
+    return AudioSegment.from_wav(wav_io)
+
+
+async def synthesize_speech_edge(text: str, voice_name: str = "en-NG-AbeoNeural", rate: str = "-18%") -> AudioSegment:
+    """Synthesizes text using Microsoft Edge Neural TTS with automatic retries and rate control."""
+    import edge_tts
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            communicate = edge_tts.Communicate(text, voice_name, rate=rate)
+            mp3_io = io.BytesIO()
+            has_audio = False
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    mp3_io.write(chunk["data"])
+                    has_audio = True
+            if has_audio:
+                mp3_io.seek(0)
+                return AudioSegment.from_file(mp3_io, format="mp3")
+            else:
+                raise RuntimeError("No audio chunk received from stream")
+        except Exception as e:
+            if attempt == max_retries:
+                raise e
+            await asyncio.sleep(1.0 * attempt)
+
+
+def build_lecture_audio(
+    client, 
+    script_data: dict, 
+    output_audio_path: Path, 
+    engine: str = "edge", 
+    voice_name: str = "en-NG-AbeoNeural", 
+    rate: str = "-18%"
+) -> Path:
+    """Builds complete audio track by synthesizing speech segments and inserting silent pauses."""
+    combined_audio = AudioSegment.silent(duration=500)
+    segments = script_data.get("segments", [])
+    total_segments = len(segments)
+
+    print(f"Synthesizing audio for {total_segments} script blocks (Engine: {engine.upper()}, Voice: {voice_name}, Rate: {rate})...")
+
+    for idx, seg in enumerate(segments, 1):
+        seg_type = seg.get("type")
+        if seg_type == "speech":
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+            label = seg.get("section_label", "Speech")
+            print(f"  [{idx}/{total_segments}] Synthesizing ({label}): {text[:50]}...")
+            
+            if engine == "gemini":
+                speech_clip = synthesize_speech_gemini(client, text, voice_name=voice_name)
+            else:
+                speech_clip = asyncio.run(synthesize_speech_edge(text, voice_name=voice_name, rate=rate))
+            
+            combined_audio += speech_clip
+            combined_audio += AudioSegment.silent(duration=400)
+
+        elif seg_type == "pause":
+            pause_sec = seg.get("duration_seconds", 3)
+            print(f"  [{idx}/{total_segments}] Inserting {pause_sec}s reflection pause...")
+            combined_audio += AudioSegment.silent(duration=int(pause_sec * 1000))
+
+    combined_audio += AudioSegment.silent(duration=1000)
+
+    output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    combined_audio.export(str(output_audio_path), format="mp3", bitrate="192k")
+    
+    total_sec = len(combined_audio) / 1000.0
+    print(f"\n[DONE] Lecture audio saved to: {output_audio_path}")
+    print(f"Total Duration: {total_sec:.1f} seconds ({total_sec / 60.0:.2f} mins)")
+    return output_audio_path
+
+
+def save_transcript_markdown(script_data: dict, output_md_path: Path):
+    """Saves formatted lecture transcript and study guide."""
+    lines = [
+        f"# Audio Masterclass: {script_data.get('title', 'Chapter Masterclass')}",
+        f"**Chapter:** {script_data.get('chapter_number')}  ",
+        f"**Estimated Duration:** ~{script_data.get('estimated_duration_mins')} minutes  ",
+        "\n---\n",
+        "## Masterclass Script & Interactive Checkpoints\n"
+    ]
+
+    for seg in script_data.get("segments", []):
+        if seg.get("type") == "speech":
+            label = seg.get("section_label", "Masterclass")
+            lines.append(f"**[{label}]**  ")
+            lines.append(f"{seg.get('text')}\n")
+        elif seg.get("type") == "pause":
+            lines.append(f"> ⏱️ *[Active Recall Pause: {seg.get('duration_seconds', 4)} seconds - {seg.get('purpose', 'Reflection pause')}...]*\n")
+
+    output_md_path.parent.mkdir(parents=True, exist_ok=True)
+    output_md_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[DONE] Transcript saved to: {output_md_path}")
+
+
+# ============================================================================
+# 6. MAIN CLI WORKFLOW
+# ============================================================================
+
+def list_books():
+    """Lists all available books in books/ directory."""
+    books_dir = Path("books")
+    if not books_dir.exists():
+        print("No books/ directory found.")
+        return
+    print("Available Books in Catalog:")
+    found = False
+    for b in sorted(books_dir.iterdir()):
+        if b.is_dir():
+            cfg_file = b / "book_config.json"
+            cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
+            title = cfg.get("book_title", b.name.replace("_", " ").title())
+            exam = cfg.get("exam_body", "General")
+            print(f"  • [{b.name}] {title} (Exam Body: {exam})")
+            found = True
+    if not found:
+        print("  (No books found in books/ directory yet. Add a folder with book.md or book.pdf)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Universal Multi-Book Pedagogical Audio Lecture Generation Engine.")
+    parser.add_argument("--book", type=str, default=None, help="Path to book file (.pdf/.md) or folder/slug in books/ (default: auto-detect)")
+    parser.add_argument("--chapter", type=int, default=1, help="Chapter number to generate (default: 1)")
+    parser.add_argument("--all-chapters", action="store_true", help="Generate all chapters in the book sequentially")
+    parser.add_argument("--list-chapters", action="store_true", help="List all detected chapters and word counts in the book")
+    parser.add_argument("--list-books", action="store_true", help="List all books available in books/ catalog")
+    parser.add_argument("--duration", type=int, default=30, help="Target duration in minutes (default: 30)")
+    parser.add_argument("--engine", type=str, default="edge", choices=["gemini", "edge"], help="TTS engine ('gemini' or 'edge')")
+    parser.add_argument("--voice", type=str, default="en-NG-AbeoNeural", help="Voice name (default: en-NG-AbeoNeural for Nigerian English Male, or en-NG-EzinneNeural for Female)")
+    parser.add_argument("--rate", type=str, default="-18%", help="Speech rate adjustment (default: -18% for 100-110 WPM)")
+    parser.add_argument("--script-file", type=str, default=None, help="Path to pre-existing script JSON (optional)")
+    parser.add_argument("--graph-path", type=str, default="graphify-out/graph.json", help="Path to graph.json")
+    parser.add_argument("--no-graph", action="store_true", help="Disable Graphify knowledge graph context injection")
+    parser.add_argument("--outdir", type=str, default="output_lectures", help="Base output directory")
+    args = parser.parse_args()
+
+    if args.list_books:
+        list_books()
+        return
+
+    # 1. Resolve Book File & Metadata
+    book_file, metadata = resolve_book(args.book)
+    print(f"\n=======================================================")
+    print(f"Universal Audio Masterclass Engine")
+    print(f"Book:   {metadata.title}")
+    print(f"Source: {book_file}")
+    print(f"Slug:   {metadata.slug}")
+    print(f"=======================================================")
+
+    # 2. List Chapters Mode
+    if args.list_chapters:
+        chapters = UniversalBookParser.parse_chapters(book_file)
+        print(f"\nFound {len(chapters)} Chapters in '{metadata.title}':")
+        for ch in chapters:
+            print(f"  Chapter {ch['number']:2d}: {ch['title']:<50} ({ch['word_count']:,} words)")
+        return
+
+    # Determine Chapters to process
+    if args.all_chapters:
+        all_ch = UniversalBookParser.parse_chapters(book_file)
+        chapter_nums = [c["number"] for c in all_ch]
+    else:
+        chapter_nums = [args.chapter]
+
+    out_base = Path(args.outdir) / metadata.slug
+    out_base.mkdir(parents=True, exist_ok=True)
+
+    for ch_num in chapter_nums:
+        print(f"\n>>> Processing Chapter {ch_num} for '{metadata.title}' <<<")
+        chapter_data = UniversalBookParser.get_chapter(book_file, ch_num)
+        print(f"Chapter Title: {chapter_data['title']} ({chapter_data['word_count']:,} words)")
+
+        # 3. Retrieve Graph Context
+        graph_context = None
+        if not args.no_graph:
+            print(f"\n[Graphify] Querying knowledge graph for Chapter {ch_num}...")
+            graph_context = retrieve_graph_context(ch_num, book_slug=metadata.slug, graph_path=args.graph_path)
+            print(f"  • Retrieved {len(graph_context.get('entities', []))} syllabus entities")
+            print(f"  • Retrieved {len(graph_context.get('relationships', []))} graph links")
+
+        # 4. Generate or Load Script
+        if args.script_file and os.path.exists(args.script_file):
+            print(f"Loading script from {args.script_file}...")
+            script_data = json.loads(Path(args.script_file).read_text(encoding="utf-8"))
+        else:
+            client = get_gemini_client()
+            print(f"Stage 1: Generating Uncompressed Pedagogical Script with Gemini Flash...")
+            script_data = generate_pedagogical_script_gemini(client, chapter_data, metadata, target_duration_mins=args.duration, graph_context=graph_context)
+            
+            script_json_path = out_base / f"chapter_{ch_num}_script.json"
+            script_json_path.write_text(json.dumps(script_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"Script saved to {script_json_path}")
+
+        # 5. Validate Graph Coverage
+        if graph_context and graph_context.get("entities"):
+            val = validate_script_against_graph(script_data, graph_context)
+            print(f"\n[Graph Coverage Gate]: {val['coverage_pct']}% of syllabus entities covered ({val['covered_count']}/{val['covered_count'] + val['missing_count']})")
+            if val["missing_sample"]:
+                print(f"  (Uncovered sample: {', '.join(val['missing_sample'])})")
+
+        # 6. Save Transcript
+        transcript_path = out_base / f"chapter_{ch_num}_transcript.md"
+        save_transcript_markdown(script_data, transcript_path)
+
+        # 7. Synthesize Audio
+        print(f"\nStage 2: Synthesizing Audio (Voice: {args.voice}, Rate: {args.rate})...")
+        audio_path = out_base / f"chapter_{ch_num}_lecture.mp3"
+        client = get_gemini_client() if args.engine == "gemini" else None
+        build_lecture_audio(client, script_data, audio_path, engine=args.engine, voice_name=args.voice, rate=args.rate)
+
+
+if __name__ == "__main__":
+    main()

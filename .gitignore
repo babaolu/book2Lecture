@@ -1,0 +1,43 @@
+# Python Virtual Environment & Cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Sensitive environment variables
+.env
+.env.*
+
+# Book-specific proprietary source files (Strictly excluded)
+*.pdf
+books/*
+!books/.gitkeep
+!books/sample_book/
+!books/sample_book/**
+COMMUNICATION PROCESS, MANAGEMENT & DEVELOPMENT (INTERMEDIATE I).md
+COMMUNICATION PROCESS, MANAGEMENT & DEVELOPMENT (INTERMEDIATE I).pdf
+
+# Generated Audio Lectures & Output artifacts
+*.mp3
+*.wav
+output_lectures/*/
+output_lectures/*.json
+output_lectures/*.md
+output_lectures/*.mp3
+
+# Graphify build outputs & incremental caches
+graphify-out/*
+!graphify-out/.gitkeep
+
+# Keep directories present in git
+!.gitkeep
+!books/.gitkeep
+!output_lectures/.gitkeep
+!books/sample_book/book_config.example.json
+
+# Scratch & OS Files
+scratch/
+.DS_Store
+Thumbs.db
