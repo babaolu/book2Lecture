@@ -104,20 +104,33 @@ def resolve_book(book_arg: Optional[str]) -> Tuple[Path, BookMetadata]:
 class UniversalBookParser:
     """Extracts text and parses chapters from Markdown, PDF, and Text files."""
 
-    @staticmethod
-    def extract_full_text(file_path: Path) -> str:
-        """Extracts complete text content from .md, .txt, or .pdf."""
+    @classmethod
+    def extract_full_text(cls, file_path: Path) -> str:
+        """Extracts complete text content from .md, .txt, or .pdf with auto-caching."""
         suffix = file_path.suffix.lower()
         if suffix in [".md", ".txt"]:
             return file_path.read_text(encoding="utf-8")
         elif suffix == ".pdf":
+            # Check if cached text exists
+            cache_txt = file_path.with_suffix(".extracted.txt")
+            if cache_txt.exists():
+                return cache_txt.read_text(encoding="utf-8")
+
             import pypdf
+            print(f"[PDF Parser] Extracting text from {file_path.name} (this may take a few seconds)...")
             reader = pypdf.PdfReader(str(file_path))
             pages_text = []
             for idx, page in enumerate(reader.pages):
                 txt = page.extract_text() or ""
                 pages_text.append(txt)
-            return "\n\n".join(pages_text)
+            full_text = "\n\n".join(pages_text)
+            
+            # Cache for fast subsequent executions
+            try:
+                cache_txt.write_text(full_text, encoding="utf-8")
+            except Exception:
+                pass
+            return full_text
         else:
             raise ValueError(f"Unsupported book format: {suffix}. Supported: .md, .txt, .pdf")
 
@@ -125,17 +138,28 @@ class UniversalBookParser:
     def parse_chapters(cls, file_path: Path) -> List[Dict]:
         """
         Heuristically discovers and segments all chapters in a book.
-        Supports standard patterns:
-        - CHAPTER 1 / Chapter 1: <Title>
+        Supports:
+        - CHAPTER 1 / CHAPTER ONE / Chapter 1: <Title>
         - MODULE 1 / Unit 1 / Section 1
         - Roman numerals (CHAPTER I, Chapter IV)
         """
         full_text = cls.extract_full_text(file_path)
         
+        # Word and Roman numeral mapping
+        word_to_num = {
+            'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+            'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+            'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+            'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20,
+            'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5,
+            'vi': 6, 'vii': 7, 'viii': 8, 'ix': 9, 'x': 10,
+            'xi': 11, 'xii': 12, 'xiii': 13, 'xiv': 14, 'xv': 15,
+            'xvi': 16, 'xvii': 17, 'xviii': 18, 'xix': 19, 'xx': 20
+        }
+
         # Regex patterns to detect chapter start boundaries
         patterns = [
-            # Pattern A: ### **CHAPTER 1** or ## **CHAPTER 1** or # CHAPTER 1
-            r"(?:^|\n)(?:#{1,4}\s+)?\*{0,2}(?:CHAPTER|Chapter|MODULE|Module|UNIT|Unit|SECTION|Section)\s+([0-9IVXLCDM]+)\b[\:\.\*\s\-]*(.*?)(?=\n)",
+            r"(?:^|\n)(?:#{1,4}\s+)?\*{0,2}(?:CHAPTER|Chapter|MODULE|Module|UNIT|Unit|SECTION|Section)\s+([0-9a-zA-Z]+)\b[\:\.\*\s\-]*(.*?)(?=\n)",
         ]
 
         matches = []
@@ -159,21 +183,20 @@ class UniversalBookParser:
                 ch_num_raw = match.group(1).strip()
                 ch_title = match.group(2).strip(" *#:-")
                 
-                # Convert Roman numeral or string to int if possible
-                try:
+                # Convert string / Roman numeral / word to integer
+                if ch_num_raw.isdigit():
                     ch_num = int(ch_num_raw)
-                except ValueError:
-                    roman_map = {'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7, 'VIII': 8, 'IX': 9, 'X': 10, 'XI': 11, 'XII': 12, 'XIII': 13, 'XIV': 14, 'XV': 15, 'XVI': 16, 'XVII': 17, 'XVIII': 18, 'XIX': 19, 'XX': 20}
-                    ch_num = roman_map.get(ch_num_raw.upper(), idx + 1)
+                else:
+                    ch_num = word_to_num.get(ch_num_raw.lower(), idx + 1)
 
                 start_pos = match.start()
                 end_pos = unique_matches[idx + 1].start() if idx + 1 < len(unique_matches) else len(full_text)
                 ch_text = full_text[start_pos:end_pos].strip()
 
                 if not ch_title or "...." in ch_title:
-                    # Look ahead on next line for a potential title heading
+                    # Look ahead on next lines for a title heading
                     lines = ch_text.splitlines()
-                    for line in lines[1:5]:
+                    for line in lines[1:6]:
                         clean_l = line.strip(" *#:-_")
                         if clean_l and not clean_l.lower().startswith("learning objectives") and "...." not in clean_l:
                             ch_title = clean_l
@@ -189,18 +212,17 @@ class UniversalBookParser:
                     "char_count": len(ch_text)
                 })
 
-        # Filter out Table of Contents duplicates (keep the substantive chapters)
+        # Filter out Table of Contents duplicates (keep substantive chapters with higher word count)
         chapters = []
         seen_nums = {}
         for ch in raw_chapters:
             num = ch["number"]
-            # If we've seen this number, keep whichever has higher word count (actual chapter vs TOC)
             if num in seen_nums:
                 existing_idx = seen_nums[num]
                 if ch["word_count"] > chapters[existing_idx]["word_count"]:
                     chapters[existing_idx] = ch
             else:
-                if ch["word_count"] > 300 or len(raw_chapters) == 1:
+                if ch["word_count"] > 150 or len(raw_chapters) == 1:
                     seen_nums[num] = len(chapters)
                     chapters.append(ch)
 
