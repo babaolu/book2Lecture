@@ -18,6 +18,7 @@ import re
 import wave
 import json
 import io
+import time
 import asyncio
 import argparse
 from pathlib import Path
@@ -214,59 +215,77 @@ class UniversalBookParser:
             print(f"[Smart Ingestion] Successfully converted .epub to Markdown: {cache_md} ({len(full_md):,} chars)")
             return full_md
 
-        # 5. PDF Books (.pdf) via Hybrid pymupdf4llm + Vision OCR
+        # 5. PDF Books (.pdf) via Hybrid pymupdf4llm + Checkpointed Vision OCR
         elif suffix == ".pdf":
-            cache_md = file_path.with_suffix(".extracted.md")
             book_md = file_path.parent / "book.md"
-            if book_md.exists():
-                return book_md.read_text(encoding="utf-8")
+            cache_md = file_path.with_suffix(".extracted.md")
+            ocr_cache_dir = file_path.parent / ".ocr_cache"
+            ocr_cache_dir.mkdir(parents=True, exist_ok=True)
+
+            # Check if full completion cache exists
             if cache_md.exists():
                 return cache_md.read_text(encoding="utf-8")
+            if book_md.exists() and len(book_md.read_text(encoding="utf-8")) > 100000:
+                return book_md.read_text(encoding="utf-8")
 
-            print(f"\n[Smart Ingestion] Ingesting PDF via pymupdf4llm: {file_path.name}...")
+            print(f"\n[Smart Ingestion] Ingesting PDF via pymupdf4llm & Checkpointed Vision OCR: {file_path.name}...")
             import fitz  # PyMuPDF
             import pymupdf4llm
             from google.genai import types
 
             doc = fitz.open(str(file_path))
             total_pages = len(doc)
-            print(f"[Smart Ingestion] Scanning {total_pages} pages for digital text vs image scans/handwritten notes...")
+            print(f"[Smart Ingestion] Scanning {total_pages} pages for digital text vs image scans...")
 
-            # Extract page by page with pymupdf4llm
-            page_markdowns = []
+            page_markdowns = [None] * total_pages
             scanned_page_indices = []
 
+            # Step 1: Check cached pages on disk first
+            cached_count = 0
             for p_idx in range(total_pages):
-                page = doc[p_idx]
-                p_text = page.get_text() or ""
-                images = page.get_images()
-                
-                if len(p_text.strip()) < 100 and len(images) > 0:
-                    scanned_page_indices.append(p_idx)
-                    page_markdowns.append(None)
+                p_cache_file = ocr_cache_dir / f"page_{p_idx+1:04d}.md"
+                if p_cache_file.exists():
+                    page_markdowns[p_idx] = p_cache_file.read_text(encoding="utf-8")
+                    cached_count += 1
                 else:
-                    try:
-                        p_md = pymupdf4llm.to_markdown(doc, pages=[p_idx])
-                        page_markdowns.append(p_md)
-                    except Exception:
-                        page_markdowns.append(p_text)
+                    page = doc[p_idx]
+                    p_text = page.get_text() or ""
+                    images = page.get_images()
 
-            print(f"[Smart Ingestion] Digital Text Pages: {total_pages - len(scanned_page_indices)} | Scanned/Image Pages: {len(scanned_page_indices)}")
+                    if len(p_text.strip()) < 100 and len(images) > 0:
+                        scanned_page_indices.append(p_idx)
+                    else:
+                        # Digital text page -> extract with pymupdf4llm and checkpoint immediately
+                        try:
+                            p_md = pymupdf4llm.to_markdown(doc, pages=[p_idx])
+                            page_markdowns[p_idx] = p_md
+                        except Exception:
+                            page_markdowns[p_idx] = p_text
+                        
+                        p_cache_file.write_text(page_markdowns[p_idx], encoding="utf-8")
+                        cached_count += 1
 
-            # Targeted Gemini Vision OCR for Scanned Pages
-            if scanned_page_indices:
-                print(f"[Smart Ingestion - Vision OCR] Running targeted Gemini Vision OCR for {len(scanned_page_indices)} scanned pages...")
+            uncached_scans = [p for p in scanned_page_indices if page_markdowns[p] is None]
+            print(f"[Smart Ingestion] Total Pages: {total_pages} | Cached/Digital: {cached_count} | Pending Scans: {len(uncached_scans)}")
+
+            # Step 2: Process Pending Scanned Pages in Checkpointed Batches
+            if uncached_scans:
+                print(f"[Smart Ingestion - Vision OCR] Processing {len(uncached_scans)} pending scanned pages...")
+                batch_size = 6
+                client = None
+
                 try:
-                    client = get_gemini_client()
                     import pypdf
                     import io
-
                     pypdf_reader = pypdf.PdfReader(str(file_path))
-                    batch_size = 6
-                    for i in range(0, len(scanned_page_indices), batch_size):
-                        batch_indices = scanned_page_indices[i:i + batch_size]
+
+                    for i in range(0, len(uncached_scans), batch_size):
+                        batch_indices = uncached_scans[i:i + batch_size]
                         print(f"  • OCR Batch for pages {[p+1 for p in batch_indices]}...")
-                        
+
+                        if client is None:
+                            client = get_gemini_client()
+
                         writer = pypdf.PdfWriter()
                         for p_idx in batch_indices:
                             writer.add_page(pypdf_reader.pages[p_idx])
@@ -290,21 +309,29 @@ class UniversalBookParser:
                             ]
                         )
                         ocr_result = resp.text.strip()
+                        
+                        # Assign and persist checkpoint to disk immediately for every page in this batch
                         page_markdowns[batch_indices[0]] = ocr_result
+                        (ocr_cache_dir / f"page_{batch_indices[0]+1:04d}.md").write_text(ocr_result, encoding="utf-8")
+                        
                         for other_idx in batch_indices[1:]:
                             page_markdowns[other_idx] = ""
+                            (ocr_cache_dir / f"page_{other_idx+1:04d}.md").write_text("", encoding="utf-8")
+
                 except Exception as ex:
-                    print(f"[Smart Ingestion - Warning] Vision OCR fallback encountered note: {ex}")
-                    for p_idx in scanned_page_indices:
+                    print(f"[Smart Ingestion - Checkpoint Saved] Note: {ex}")
+                    print(f"[Smart Ingestion - Checkpoint Saved] All completed pages are safely saved to {ocr_cache_dir}. You can resume anytime without repeating work.")
+                    for p_idx in uncached_scans:
                         if page_markdowns[p_idx] is None:
                             page_markdowns[p_idx] = doc[p_idx].get_text() or ""
 
-            full_markdown = "\n\n".join([m for m in page_markdowns if m])
+            # Step 3: Assemble all available pages into book.md
+            full_markdown = "\n\n".join([m for m in page_markdowns if m and m.strip()])
             try:
-                cache_md.write_text(full_markdown, encoding="utf-8")
-                if not book_md.exists():
-                    book_md.write_text(full_markdown, encoding="utf-8")
-                print(f"[Smart Ingestion] Successfully assembled & cached Markdown: {cache_md} ({len(full_markdown):,} chars)")
+                book_md.write_text(full_markdown, encoding="utf-8")
+                if not any(page_markdowns[p] is None for p in scanned_page_indices):
+                    cache_md.write_text(full_markdown, encoding="utf-8")
+                print(f"[Smart Ingestion] Successfully assembled & updated {book_md} ({len(full_markdown):,} chars)")
             except Exception:
                 pass
 
@@ -892,14 +919,29 @@ Please convert the following complete chapter text from '{metadata.title}' into 
 --- CHAPTER END ---
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[system_instruction, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.7
-        )
-    )
+    max_retries = 5
+    response = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[system_instruction, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.7
+                )
+            )
+            break
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                wait_secs = 50 if attempt == 0 else (attempt + 1) * 25
+                print(f"[Rate Limit] Gemini API quota window active. Waiting {wait_secs}s before retry (Attempt {attempt+1}/{max_retries})...")
+                time.sleep(wait_secs)
+            else:
+                raise e
+
+    if not response or not response.text:
+        raise RuntimeError("Failed to generate pedagogical script after retry attempts.")
 
     text_resp = response.text.strip()
     if text_resp.startswith("```json"):
