@@ -44,8 +44,8 @@ class BookMetadata:
             self.slug = re.sub(r"[^a-zA-Z0-9_]+", "_", book_path.stem).strip("_").lower()
 
         # Derive title
-        if self.config_data.get("book_title"):
-            self.title = self.config_data["book_title"]
+        if self.config_data.get("title") or self.config_data.get("book_title"):
+            self.title = self.config_data.get("title") or self.config_data.get("book_title")
         else:
             self.title = book_path.stem.replace("_", " ").title()
 
