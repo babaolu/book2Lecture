@@ -416,47 +416,50 @@ Path('graphify-out/GRAPH_REPORT.md').write_text(rep, encoding='utf-8')
         print(f"[Graphify] Note on build sync: {e}")
 
 
-def index_book_to_graph(client, book_file: Path, metadata: BookMetadata, graph_path: str = "graphify-out/graph.json") -> dict:
+def index_book_to_graph(client, book_file: Path, metadata: BookMetadata, graph_path: str = "graphify-out/graph.json", deep_mode: bool = True) -> dict:
     """
     Extracts deep semantic knowledge graph entities, relationships, prerequisites,
-    and exam rationales across all chapters of a book and merges them into Graphify.
+    hyperedges, semantic similarities, and exam rationales across all chapters of a book in DEEP_MODE.
     """
     from google.genai import types
     chapters = UniversalBookParser.parse_chapters(book_file)
-    print(f"\n[Graphify Indexer] Indexing {len(chapters)} chapters for '{metadata.title}' into Knowledge Graph...")
+    print(f"\n[Graphify Indexer - DEEP MODE] Deeply indexing {len(chapters)} chapters for '{metadata.title}' into Knowledge Graph...")
 
     g_path = Path(graph_path)
     existing_data = json.loads(g_path.read_text(encoding="utf-8")) if g_path.exists() else {"nodes": [], "links": [], "hyperedges": []}
     
     existing_nodes = {n["id"]: n for n in existing_data.get("nodes", [])}
     existing_links = existing_data.get("links", [])
+    existing_hyperedges = existing_data.get("hyperedges", [])
     
     for ch in chapters:
         ch_num = ch["number"]
         ch_title = ch["title"]
-        ch_text = ch["text"][:12000] # Substantive chapter context
+        ch_text = ch["text"][:14000] # Substantive chapter context
         
-        print(f"  • Extracting knowledge graph nodes for Chapter {ch_num}: {ch_title}...")
+        print(f"  • Deep extraction for Chapter {ch_num}: {ch_title}...")
         prompt = f"""
-You are an expert knowledge graph extraction agent for Graphify.
-Extract a comprehensive knowledge graph fragment for Chapter {ch_num} ({ch_title}) of the textbook '{metadata.title}'.
+You are an expert knowledge graph extraction agent for Graphify running in DEEP_MODE.
+Extract a rich, comprehensive knowledge graph fragment for Chapter {ch_num} ({ch_title}) of '{metadata.title}'.
 
-Extract:
-1. Nodes: Named concepts, formulas, methodologies, classifications, variables, case studies, and exam rationales in Chapter {ch_num}.
+DEEP_MODE EXTRACTION RULES:
+1. Nodes:
+   - Extract all named concepts, formulas, methodologies, classifications, variables, case studies, distributions, and exam rationales in Chapter {ch_num}.
    - id: snake_case string strictly prefixed with '{metadata.slug}_ch{ch_num}_' (e.g. '{metadata.slug}_ch{ch_num}_descriptive_statistics')
    - label: Clear human-readable name
    - file_type: 'concept' or 'document'
    - source_file: 'books/{metadata.slug}/book.md'
    - source_location: 'Chapter {ch_num}'
-   - rationale: Brief exam justification or practical utility
+   - rationale: Detailed exam justification, practical HR/business application, or why this concept matters.
 
-2. Edges:
-   - source: node_id
-   - target: node_id
-   - relation: 'prerequisite_for', 'conceptually_related_to', 'contains', 'calculates', 'contrasted_with', 'applies_to'
-   - confidence: 'EXTRACTED' or 'INFERRED'
-   - confidence_score: 1.0 or 0.85
-   - source_file: 'books/{metadata.slug}/book.md'
+2. Edges (Aggressive INFERRED and Structural Relationships):
+   - Be aggressive with INFERRED relationships: prerequisite dependencies, shared assumptions, latent couplings, formula derivations, and contrasted concepts.
+   - For EXTRACTED edges: confidence='EXTRACTED', confidence_score=1.0
+   - For INFERRED edges: confidence='INFERRED', confidence_score from [0.95, 0.85, 0.75, 0.65]
+   - Relations: 'prerequisite_for', 'conceptually_related_to', 'contains', 'calculates', 'contrasted_with', 'applies_to', 'semantically_similar_to', 'rationale_for'
+
+3. Hyperedges:
+   - If 3 or more concepts participate together in a shared process, formula pipeline, or framework, define a hyperedge.
 
 Output ONLY valid JSON with no markdown fences:
 {{
@@ -464,7 +467,10 @@ Output ONLY valid JSON with no markdown fences:
     {{"id": "...", "label": "...", "file_type": "concept", "source_file": "books/{metadata.slug}/book.md", "source_location": "Chapter {ch_num}", "rationale": "..."}}
   ],
   "edges": [
-    {{"source": "...", "target": "...", "relation": "conceptually_related_to", "confidence": "EXTRACTED", "confidence_score": 1.0}}
+    {{"source": "...", "target": "...", "relation": "...", "confidence": "EXTRACTED|INFERRED", "confidence_score": 1.0}}
+  ],
+  "hyperedges": [
+    {{"id": "...", "label": "...", "nodes": ["...", "..."], "relation": "participate_in"}}
   ]
 }}
 """
@@ -492,6 +498,10 @@ Output ONLY valid JSON with no markdown fences:
                     "weight": 1.0
                 }
                 existing_links.append(link_obj)
+
+            # Merge hyperedges
+            for h in data.get("hyperedges", []):
+                existing_hyperedges.append(h)
         except Exception as ex:
             print(f"    [Warning] Extraction note on Chapter {ch_num}: {ex}")
 
@@ -509,10 +519,10 @@ Output ONLY valid JSON with no markdown fences:
     out_graph = {
         "nodes": list(existing_nodes.values()),
         "links": unique_links,
-        "hyperedges": existing_data.get("hyperedges", [])
+        "hyperedges": existing_hyperedges
     }
     g_path.write_text(json.dumps(out_graph, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\n[Graphify Indexer] Successfully merged {len(existing_nodes)} nodes and {len(unique_links)} links into {g_path}")
+    print(f"\n[Graphify Indexer - DEEP MODE] Successfully merged {len(existing_nodes)} nodes and {len(unique_links)} links into {g_path}")
     
     # Rebuild clusters and export HTML visualization
     sync_graphify_build(graph_path)
