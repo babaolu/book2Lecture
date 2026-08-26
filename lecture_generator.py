@@ -222,11 +222,9 @@ class UniversalBookParser:
             ocr_cache_dir = file_path.parent / ".ocr_cache"
             ocr_cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Check if full completion cache exists
+            # Check if full verified completion cache exists
             if cache_md.exists():
                 return cache_md.read_text(encoding="utf-8")
-            if book_md.exists() and len(book_md.read_text(encoding="utf-8")) > 100000:
-                return book_md.read_text(encoding="utf-8")
 
             print(f"\n[Smart Ingestion] Ingesting PDF via pymupdf4llm & Checkpointed Vision OCR: {file_path.name}...")
             import fitz  # PyMuPDF
@@ -377,6 +375,7 @@ class UniversalBookParser:
         # Regex patterns to detect chapter start boundaries
         patterns = [
             r"(?:^|\n)(?:#{1,4}\s+)?\*{0,2}(?:CHAPTER|Chapter|MODULE|Module|UNIT|Unit|SECTION|Section)\s+([0-9a-zA-Z]+)\b[\:\.\*\s\-]*(.*?)(?=\n)",
+            r"(?:^|\n)(?:#{1,4}\s+)?\*{0,2}([0-9]{1,2})\.1\s+(?:Learning\s+Objectives|Introduction|Meaning)\b[\:\.\*\s\-]*(.*?)(?=\n)"
         ]
 
         matches = []
@@ -398,7 +397,7 @@ class UniversalBookParser:
         if unique_matches:
             for idx, match in enumerate(unique_matches):
                 ch_num_raw = match.group(1).strip()
-                ch_title = match.group(2).strip(" *#:-")
+                ch_title = match.group(2).strip(" *#:-") if len(match.groups()) > 1 and match.group(2) else ""
                 
                 # Convert string / Roman numeral / word to integer
                 if ch_num_raw.isdigit():
@@ -410,15 +409,21 @@ class UniversalBookParser:
                 end_pos = unique_matches[idx + 1].start() if idx + 1 < len(unique_matches) else len(full_text)
                 ch_text = full_text[start_pos:end_pos].strip()
 
-                if not ch_title or "...." in ch_title:
+                if not ch_title or "...." in ch_title or ch_title.lower().startswith("after"):
                     # Look ahead on next lines for a title heading
                     lines = ch_text.splitlines()
-                    for line in lines[1:6]:
+                    for line in lines[:10]:
                         clean_l = line.strip(" *#:-_")
-                        if clean_l and not clean_l.lower().startswith("learning objectives") and "...." not in clean_l:
+                        if (clean_l and 
+                            not clean_l.lower().startswith("learning objectives") and 
+                            not clean_l.lower().startswith("after") and 
+                            "...." not in clean_l and 
+                            not re.match(r"^(?:chapter|module|unit)\s+", clean_l, re.I) and
+                            not re.match(r"^(?:[ivx]+\.|\([ivx]+\)|[0-9]+\.|\([0-9]+\)|[a-z]\.|\([a-z]\))\s*", clean_l, re.I) and
+                            not re.match(r"^[0-9]+\.[0-9]+", clean_l)):
                             ch_title = clean_l
                             break
-                    if not ch_title or "...." in ch_title:
+                    if not ch_title or "...." in ch_title or ch_title.lower().startswith("after"):
                         ch_title = f"Chapter {ch_num}"
 
                 raw_chapters.append({
@@ -1236,6 +1241,10 @@ def main():
         audio_path = out_base / f"chapter_{ch_num}_lecture.mp3"
         client = get_gemini_client() if args.engine == "gemini" else None
         build_lecture_audio(client, script_data, audio_path, engine=args.engine, voice_name=args.voice, rate=args.rate)
+
+        # 8. Automated Post-Chapter Knowledge Graph Synchronization
+        print(f"\n[Graphify] Running automated post-chapter knowledge graph update for Chapter {ch_num}...")
+        sync_graphify_build(args.graph_path)
 
 
 if __name__ == "__main__":
