@@ -106,31 +106,119 @@ class UniversalBookParser:
 
     @classmethod
     def extract_full_text(cls, file_path: Path) -> str:
-        """Extracts complete text content from .md, .txt, or .pdf with auto-caching."""
+        """
+        Extracts complete text content from .md, .txt, or .pdf with auto-caching.
+        For PDFs: Uses a Hybrid Ingestion Pipeline:
+        1. Fast local Markdown extraction via pymupdf4llm (0 API tokens).
+        2. Heuristic density check per page (detecting scans/handwritten notes).
+        3. Targeted Gemini Vision OCR for low-density/scanned pages.
+        4. Auto-caches output to books/<slug>/book.md or .extracted.md.
+        """
         suffix = file_path.suffix.lower()
         if suffix in [".md", ".txt"]:
             return file_path.read_text(encoding="utf-8")
         elif suffix == ".pdf":
-            # Check if cached text exists
-            cache_txt = file_path.with_suffix(".extracted.txt")
-            if cache_txt.exists():
-                return cache_txt.read_text(encoding="utf-8")
+            # 1. Check if cached markdown/text exists
+            cache_md = file_path.with_suffix(".extracted.md")
+            book_md = file_path.parent / "book.md"
+            if book_md.exists():
+                return book_md.read_text(encoding="utf-8")
+            if cache_md.exists():
+                return cache_md.read_text(encoding="utf-8")
 
-            import pypdf
-            print(f"[PDF Parser] Extracting text from {file_path.name} (this may take a few seconds)...")
-            reader = pypdf.PdfReader(str(file_path))
-            pages_text = []
-            for idx, page in enumerate(reader.pages):
-                txt = page.extract_text() or ""
-                pages_text.append(txt)
-            full_text = "\n\n".join(pages_text)
-            
-            # Cache for fast subsequent executions
+            # 2. Hybrid pymupdf4llm + Vision OCR Pipeline
+            print(f"\n[Smart Ingestion] Ingesting PDF via pymupdf4llm: {file_path.name}...")
+            import fitz  # PyMuPDF
+            import pymupdf4llm
+            from google.genai import types
+
+            doc = fitz.open(str(file_path))
+            total_pages = len(doc)
+            print(f"[Smart Ingestion] Scanning {total_pages} pages for digital text vs image scans/handwritten notes...")
+
+            # Extract page by page with pymupdf4llm
+            page_markdowns = []
+            scanned_page_indices = []
+
+            for p_idx in range(total_pages):
+                page = doc[p_idx]
+                p_text = page.get_text() or ""
+                images = page.get_images()
+                
+                # Check if page is predominantly a scanned image or handwritten note
+                # (low text length < 100 chars, but has embedded images)
+                if len(p_text.strip()) < 100 and len(images) > 0:
+                    scanned_page_indices.append(p_idx)
+                    page_markdowns.append(None)  # Placeholder for Vision OCR
+                else:
+                    # Native digital page: extract via pymupdf4llm
+                    try:
+                        p_md = pymupdf4llm.to_markdown(doc, pages=[p_idx])
+                        page_markdowns.append(p_md)
+                    except Exception:
+                        page_markdowns.append(p_text)
+
+            print(f"[Smart Ingestion] Digital Text Pages: {total_pages - len(scanned_page_indices)} | Scanned/Image Pages: {len(scanned_page_indices)}")
+
+            # 3. Targeted Gemini Vision OCR for Scanned Pages (if any)
+            if scanned_page_indices:
+                print(f"[Smart Ingestion - Vision OCR] Running targeted Gemini Vision OCR for {len(scanned_page_indices)} scanned pages...")
+                try:
+                    client = get_gemini_client()
+                    import pypdf
+                    import io
+
+                    pypdf_reader = pypdf.PdfReader(str(file_path))
+
+                    # Process scanned pages in batches of up to 6 pages to preserve context and rate limits
+                    batch_size = 6
+                    for i in range(0, len(scanned_page_indices), batch_size):
+                        batch_indices = scanned_page_indices[i:i + batch_size]
+                        print(f"  • OCR Batch for pages {[p+1 for p in batch_indices]}...")
+                        
+                        writer = pypdf.PdfWriter()
+                        for p_idx in batch_indices:
+                            writer.add_page(pypdf_reader.pages[p_idx])
+
+                        pdf_bytes = io.BytesIO()
+                        writer.write(pdf_bytes)
+                        pdf_data = pdf_bytes.getvalue()
+
+                        ocr_prompt = (
+                            "You are an expert OCR transcription engine. "
+                            "Transcribe all text, handwritten notes, mathematical equations, tables, and diagrams "
+                            "from these scanned book pages into clean, highly structured Markdown. "
+                            "Preserve all headings (#, ##), bullet points, and table formatting. Do not summarize."
+                        )
+
+                        resp = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                types.Part.from_bytes(data=pdf_data, mime_type="application/pdf"),
+                                ocr_prompt
+                            ]
+                        )
+                        ocr_result = resp.text.strip()
+                        page_markdowns[batch_indices[0]] = ocr_result
+                        for other_idx in batch_indices[1:]:
+                            page_markdowns[other_idx] = "" # Handled in batch result
+                except Exception as ex:
+                    print(f"[Smart Ingestion - Warning] Vision OCR fallback encountered note: {ex}")
+                    for p_idx in scanned_page_indices:
+                        if page_markdowns[p_idx] is None:
+                            page_markdowns[p_idx] = doc[p_idx].get_text() or ""
+
+            # 4. Assemble complete markdown and cache
+            full_markdown = "\n\n".join([m for m in page_markdowns if m])
             try:
-                cache_txt.write_text(full_text, encoding="utf-8")
+                cache_md.write_text(full_markdown, encoding="utf-8")
+                if not book_md.exists():
+                    book_md.write_text(full_markdown, encoding="utf-8")
+                print(f"[Smart Ingestion] Successfully assembled & cached Markdown: {cache_md} ({len(full_markdown):,} chars)")
             except Exception:
                 pass
-            return full_text
+
+            return full_markdown
         else:
             raise ValueError(f"Unsupported book format: {suffix}. Supported: .md, .txt, .pdf")
 
