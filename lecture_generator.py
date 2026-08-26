@@ -360,11 +360,169 @@ def get_gemini_client():
     return genai.Client(api_key=api_key)
 
 
+def sync_graphify_build(graph_path: str = "graphify-out/graph.json"):
+    """Rebuilds Graphify clustering, report, and exports HTML visualization."""
+    import subprocess
+    py_path_file = Path("graphify-out/.graphify_python")
+    py_bin = py_path_file.read_text().strip() if py_path_file.exists() else ".venv/bin/python"
+    
+    script = """
+import json, networkx as nx
+from pathlib import Path
+from graphify.cluster import cluster, score_all
+from graphify.analyze import god_nodes, surprising_connections, suggest_questions
+from graphify.report import generate
+from graphify.export import to_json
+
+g_path = Path('graphify-out/graph.json')
+if not g_path.exists():
+    exit(0)
+
+data = json.loads(g_path.read_text(encoding='utf-8'))
+nodes_dict = {n['id']: n for n in data.get('nodes', [])}
+
+G = nx.Graph()
+for nid, nd in nodes_dict.items():
+    G.add_node(nid, **nd)
+
+for link in data.get('links', []):
+    u = link.get('source')
+    v = link.get('target')
+    if u in nodes_dict and v in nodes_dict:
+        G.add_edge(u, v, **link)
+
+communities = cluster(G)
+cohesion = score_all(G, communities)
+gods = god_nodes(G)
+surprises = surprising_connections(G, communities)
+
+labels = json.loads(Path('graphify-out/.graphify_labels.json').read_text()) if Path('graphify-out/.graphify_labels.json').exists() else {}
+labels = {int(k): v for k, v in labels.items()}
+for cid in communities:
+    if cid not in labels:
+        labels[cid] = f'Community {cid}'
+
+questions = suggest_questions(G, communities, labels)
+
+to_json(G, communities, 'graphify-out/graph.json')
+rep = generate(G, communities, cohesion, labels, gods, surprises, {'files': [], 'new_total': 0, 'total_files': len(nodes_dict), 'total_words': 100000, 'added': [], 'modified': []}, {'input': 0, 'output': 0}, '.', suggested_questions=questions)
+Path('graphify-out/GRAPH_REPORT.md').write_text(rep, encoding='utf-8')
+"""
+    try:
+        subprocess.run([py_bin, "-c", script], check=True, capture_output=True)
+        subprocess.run([py_bin, "-m", "graphify", "export", "html"], check=True, capture_output=True)
+        print("[Graphify] Successfully synced graph.json, GRAPH_REPORT.md, and graph.html!")
+    except Exception as e:
+        print(f"[Graphify] Note on build sync: {e}")
+
+
+def index_book_to_graph(client, book_file: Path, metadata: BookMetadata, graph_path: str = "graphify-out/graph.json") -> dict:
+    """
+    Extracts deep semantic knowledge graph entities, relationships, prerequisites,
+    and exam rationales across all chapters of a book and merges them into Graphify.
+    """
+    from google.genai import types
+    chapters = UniversalBookParser.parse_chapters(book_file)
+    print(f"\n[Graphify Indexer] Indexing {len(chapters)} chapters for '{metadata.title}' into Knowledge Graph...")
+
+    g_path = Path(graph_path)
+    existing_data = json.loads(g_path.read_text(encoding="utf-8")) if g_path.exists() else {"nodes": [], "links": [], "hyperedges": []}
+    
+    existing_nodes = {n["id"]: n for n in existing_data.get("nodes", [])}
+    existing_links = existing_data.get("links", [])
+    
+    for ch in chapters:
+        ch_num = ch["number"]
+        ch_title = ch["title"]
+        ch_text = ch["text"][:12000] # Substantive chapter context
+        
+        print(f"  • Extracting knowledge graph nodes for Chapter {ch_num}: {ch_title}...")
+        prompt = f"""
+You are an expert knowledge graph extraction agent for Graphify.
+Extract a comprehensive knowledge graph fragment for Chapter {ch_num} ({ch_title}) of the textbook '{metadata.title}'.
+
+Extract:
+1. Nodes: Named concepts, formulas, methodologies, classifications, variables, case studies, and exam rationales in Chapter {ch_num}.
+   - id: snake_case string strictly prefixed with '{metadata.slug}_ch{ch_num}_' (e.g. '{metadata.slug}_ch{ch_num}_descriptive_statistics')
+   - label: Clear human-readable name
+   - file_type: 'concept' or 'document'
+   - source_file: 'books/{metadata.slug}/book.md'
+   - source_location: 'Chapter {ch_num}'
+   - rationale: Brief exam justification or practical utility
+
+2. Edges:
+   - source: node_id
+   - target: node_id
+   - relation: 'prerequisite_for', 'conceptually_related_to', 'contains', 'calculates', 'contrasted_with', 'applies_to'
+   - confidence: 'EXTRACTED' or 'INFERRED'
+   - confidence_score: 1.0 or 0.85
+   - source_file: 'books/{metadata.slug}/book.md'
+
+Output ONLY valid JSON with no markdown fences:
+{{
+  "nodes": [
+    {{"id": "...", "label": "...", "file_type": "concept", "source_file": "books/{metadata.slug}/book.md", "source_location": "Chapter {ch_num}", "rationale": "..."}}
+  ],
+  "edges": [
+    {{"source": "...", "target": "...", "relation": "conceptually_related_to", "confidence": "EXTRACTED", "confidence_score": 1.0}}
+  ]
+}}
+"""
+        try:
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[prompt, f"Chapter Text:\n{ch_text}"],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            data = json.loads(resp.text.strip())
+            
+            # Merge nodes
+            for n in data.get("nodes", []):
+                existing_nodes[n["id"]] = n
+                
+            # Merge edges
+            for e in data.get("edges", []):
+                link_obj = {
+                    "source": e.get("source"),
+                    "target": e.get("target"),
+                    "relation": e.get("relation", "conceptually_related_to"),
+                    "confidence": e.get("confidence", "EXTRACTED"),
+                    "confidence_score": e.get("confidence_score", 1.0),
+                    "source_file": f"books/{metadata.slug}/book.md",
+                    "weight": 1.0
+                }
+                existing_links.append(link_obj)
+        except Exception as ex:
+            print(f"    [Warning] Extraction note on Chapter {ch_num}: {ex}")
+
+    # Remove duplicate links
+    seen_links = set()
+    unique_links = []
+    for l in existing_links:
+        pair = (l.get("source"), l.get("target"), l.get("relation"))
+        if pair not in seen_links and l.get("source") in existing_nodes and l.get("target") in existing_nodes:
+            seen_links.add(pair)
+            unique_links.append(l)
+
+    # Save merged graph
+    g_path.parent.mkdir(parents=True, exist_ok=True)
+    out_graph = {
+        "nodes": list(existing_nodes.values()),
+        "links": unique_links,
+        "hyperedges": existing_data.get("hyperedges", [])
+    }
+    g_path.write_text(json.dumps(out_graph, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\n[Graphify Indexer] Successfully merged {len(existing_nodes)} nodes and {len(unique_links)} links into {g_path}")
+    
+    # Rebuild clusters and export HTML visualization
+    sync_graphify_build(graph_path)
+    return out_graph
+
+
 def research_book_blueprint(client, book_file: Path, metadata: BookMetadata) -> str:
     """
-    Performs deep pedagogical research on a specific textbook and generates
-    books/<slug>/deeper-research-report.md containing subject-specific learning science,
-    spoken translation rules, mental models, and exam traps.
+    Performs deep pedagogical research on a specific textbook, indexes it into
+    Graphify knowledge graph, and generates books/<slug>/deeper-research-report.md.
     """
     from google.genai import types
     print(f"\n[Deeper Research Engine] Conducting deep pedagogical research for '{metadata.title}'...")
@@ -422,6 +580,13 @@ Format with rich Markdown, clear headings, callouts, and concrete examples.
     out_path = book_dir / "deeper-research-report.md"
     out_path.write_text(report_text, encoding="utf-8")
     print(f"[DONE] Specialized deeper research report saved to: {out_path}")
+    
+    # Auto-index book into Graphify knowledge graph
+    try:
+        index_book_to_graph(client, book_file, metadata)
+    except Exception as e:
+        print(f"[Graphify] Note during auto-indexing: {e}")
+
     return report_text
 
 
@@ -726,6 +891,8 @@ def main():
     parser.add_argument("--list-chapters", action="store_true", help="List all detected chapters and word counts in the book")
     parser.add_argument("--list-books", action="store_true", help="List all books available in books/ catalog")
     parser.add_argument("--research-book", action="store_true", help="Conduct deep pedagogical research and generate books/<slug>/deeper-research-report.md")
+    parser.add_argument("--index-book", action="store_true", help="Index all chapters of this book into the Graphify knowledge graph")
+    parser.add_argument("--sync-graph", action="store_true", help="Rebuild graph clusters and export graph.html")
     parser.add_argument("--duration", type=int, default=30, help="Target duration in minutes (default: 30)")
     parser.add_argument("--engine", type=str, default="edge", choices=["gemini", "edge"], help="TTS engine ('gemini' or 'edge')")
     parser.add_argument("--voice", type=str, default="en-NG-AbeoNeural", help="Voice name (default: en-NG-AbeoNeural for Nigerian English Male, or en-NG-EzinneNeural for Female)")
@@ -738,6 +905,10 @@ def main():
 
     if args.list_books:
         list_books()
+        return
+
+    if args.sync_graph:
+        sync_graphify_build(args.graph_path)
         return
 
     # 1. Resolve Book File & Metadata
@@ -753,6 +924,12 @@ def main():
     if args.research_book:
         client = get_gemini_client()
         research_book_blueprint(client, book_file, metadata)
+        return
+
+    # 1c. Knowledge Graph Indexing Mode
+    if args.index_book:
+        client = get_gemini_client()
+        index_book_to_graph(client, book_file, metadata, graph_path=args.graph_path)
         return
 
     # 2. List Chapters Mode
