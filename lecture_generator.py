@@ -265,6 +265,10 @@ def retrieve_graph_context(chapter_num: int, book_slug: str = "", graph_path: st
     chapter_node_ids = set()
     for nid, ndata in nodes_data.items():
         lbl = ndata.get("label", "")
+        source_file = ndata.get("source_file", "")
+        # Filter by book slug if specified to prevent cross-book bleeding
+        if book_slug and (book_slug not in nid.lower() and book_slug not in source_file.lower()):
+            continue
         if c_str in nid.lower() or c_label.lower() in lbl.lower():
             chapter_node_ids.add(nid)
 
@@ -345,7 +349,7 @@ def validate_script_against_graph(script: dict, graph_context: dict) -> dict:
 
 
 # ============================================================================
-# 4. MASTERCLASS SCRIPT GENERATOR
+# 4. MASTERCLASS SCRIPT GENERATOR & DEEPER RESEARCH ENGINE
 # ============================================================================
 
 def get_gemini_client():
@@ -354,6 +358,71 @@ def get_gemini_client():
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is not set. Please export GEMINI_API_KEY='your_api_key'")
     return genai.Client(api_key=api_key)
+
+
+def research_book_blueprint(client, book_file: Path, metadata: BookMetadata) -> str:
+    """
+    Performs deep pedagogical research on a specific textbook and generates
+    books/<slug>/deeper-research-report.md containing subject-specific learning science,
+    spoken translation rules, mental models, and exam traps.
+    """
+    from google.genai import types
+    print(f"\n[Deeper Research Engine] Conducting deep pedagogical research for '{metadata.title}'...")
+    
+    full_text = UniversalBookParser.extract_full_text(book_file)
+    sample_text = full_text[:40000] # First ~8,000 words covering TOC and early chapters
+    
+    system_prompt = f"""
+You are a distinguished educational cognitive scientist and masterclass pedagogical architect.
+Your task is to conduct a DEEP PEDAGOGICAL RESEARCH STUDY on the professional textbook:
+'{metadata.title}' (Examining Body / Field: {metadata.exam_body}, Target Audience: {metadata.target_audience}).
+
+Your goal is to produce a comprehensive, master-level markdown dossier titled:
+'# Deeper Pedagogical Research Report & Assimilation Blueprint: {metadata.title}'
+
+This document will serve as the specialized pedagogical guide used by AI scriptwriters and lecturers to generate world-class spoken audio masterclasses for EVERY chapter in this book.
+
+Your report MUST be deep, authoritative, and exhaustive, covering:
+
+1. EXECUTIVE SUMMARY & SUBJECT-SPECIFIC LEARNING SCIENCE
+   - Cognitive architecture of learning in this specific discipline ({metadata.title}).
+   - How adult candidates assimilate this material (e.g. overcoming math anxiety, abstract conceptualization, statutory interpretation, or procedural design).
+   - Core failure modes and misconceptions students make in this examination.
+
+2. SPOKEN-WORD TRANSLATION RULES & AUDIO MODALITY
+   - Specify the exact Spoken Pedagogical Modality (Quantitative & Statistical, Conceptual & Organizational, Legal & Regulatory, or Procedural & Methodological).
+   - Provide concrete rules for translating discipline-specific symbols, jargon, formulas, or statutory citations into natural, engaging spoken English.
+   - For Quantitative books: Define the 'Spoken Formula Intuition' rule (explain conceptual meaning in plain words before computing).
+   - For Management/Communication: Define the 'Workplace Scenario & Behavioral Dynamic' rule.
+   - For Law/Governance: Define the 'IRAC Case Law & Statutory Analysis' rule.
+
+3. SUBJECT-SPECIFIC MENTAL MODELS, ANALOGIES & MNEMONICS
+   - 4 to 6 powerful physical analogies, mental models, and memory devices tailored specifically to the concepts in this book.
+
+4. CURRICULUM ARCHITECTURE & PREREQUISITE DEPENDENCY MAP
+   - Map out the progression of all chapters in the book.
+   - Identify foundational 'god-nodes' in early chapters that future chapters depend upon.
+
+5. HIGH-YIELD EXAM TRAPS & DISTINCTIONS
+   - 5 to 10 classic exam traps, confusing pairs, and high-frequency distinction questions candidates encounter in this subject.
+
+Format with rich Markdown, clear headings, callouts, and concrete examples.
+"""
+
+    prompt = f"Textbook Sample & Chapter Overview:\n\n{sample_text}"
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[system_prompt, prompt],
+        config=types.GenerateContentConfig(temperature=0.7)
+    )
+
+    report_text = response.text.strip()
+    book_dir = book_file.parent if book_file.is_file() else book_file
+    out_path = book_dir / "deeper-research-report.md"
+    out_path.write_text(report_text, encoding="utf-8")
+    print(f"[DONE] Specialized deeper research report saved to: {out_path}")
+    return report_text
 
 
 def generate_pedagogical_script_gemini(
@@ -365,9 +434,19 @@ def generate_pedagogical_script_gemini(
 ) -> dict:
     """
     Transforms dense academic text into an unhurried, conversational spoken script
-    adhering to the Uncompressed Masterclass Architecture.
+    adhering to the Universal Masterclass Architecture and book-specific blueprint.
     """
     from google.genai import types
+
+    # Load book-specific deeper research report if present
+    book_dir = metadata.book_path.parent if metadata.book_path.is_file() else metadata.book_path
+    deeper_report_path = book_dir / "deeper-research-report.md"
+    deeper_context = ""
+    if deeper_report_path.exists():
+        deeper_context = f"""
+SPECIALIZED BOOK PEDAGOGY BLUEPRINT ({metadata.title}):
+{deeper_report_path.read_text(encoding='utf-8')[:8000]}
+"""
 
     graph_section = ""
     if graph_context and graph_context.get("entities"):
@@ -391,7 +470,7 @@ KNOWLEDGE GRAPH CONTEXT (Syllabus Connections):
     system_instruction = f"""
 You are an award-winning educational lecturer and masterclass podcaster transforming the professional textbook '{metadata.title}' (Target Audience: {metadata.target_audience}, Examining Body: {metadata.exam_body}) into an engaging, unhurried, high-yield audio masterclass.
 
-Your goal is to produce an audio script that strictly follows the Uncompressed Masterclass Architecture:
+Your goal is to produce an audio script that strictly follows the Universal Masterclass Architecture:
 
 1. STRUCTURE & HOOK:
    - Begin with a vivid, relatable workplace scenario or thought experiment that establishes immediate stakes.
@@ -401,6 +480,8 @@ Your goal is to produce an audio script that strictly follows the Uncompressed M
 2. UNCOMPRESSED TIERED-DEPTH PEDAGOGY:
    - Never artificially compress or rush through examinable concepts.
    - Explain difficult, nuanced, or examinable concepts deeply with concrete scenarios and why-it-works logic.
+   - For Quantitative subjects: Adhere to 'Spoken Formula Intuition'—explain the conceptual logic of mathematical equations in plain words before computing.
+   - For Conceptual subjects: Use dialogue, roleplay, and spoken geometric models for organograms/networks.
    - Compress obvious lists efficiently without omitting any syllabus terms.
    - Adopt a conversational spoken-word style (short punchy sentences, contractions like 'you're', 'let's', second-person 'you' and 'we').
 
@@ -413,16 +494,18 @@ Your goal is to produce an audio script that strictly follows the Uncompressed M
    - At each checkpoint, provide a natural transition inviting the listener to pause, review notes, or continue, followed by a 5-second pause block.
 
 5. MENTAL IMAGERY FOR ABSTRACT MODELS:
-   - For abstract structures, networks, or diagrams where the listener cannot see a visual aid, provide vivid mental pictures (e.g. bicycle wheel hub/spokes, relay runners).
+   - For abstract structures, networks, or diagrams where the listener cannot see a visual aid, provide vivid mental pictures.
 
 6. CASE STUDY & EXAM REVIEW INTEGRATION:
-   - If the chapter contains official case studies (e.g. Mr. Agbeloba cashew farmer scenario), walk through the scenario, the official questions, and full exam justifications.
+   - If the chapter contains official case studies, walk through the scenario, the official questions, and full exam justifications.
    - Walk through chapter multiple-choice questions (MCQs) and review questions, explaining common exam traps.
 
 7. THREE-LAYER FINAL CONSOLIDATION:
    - Layer 1: Rapid 5-point synthesis.
    - Layer 2: High-yield exam distinctions ("Don't confuse X with Y").
    - Layer 3: Spaced-recall prompt and forward bridge into the next chapter.
+
+{deeper_context}
 
 {graph_section}
 
@@ -642,6 +725,7 @@ def main():
     parser.add_argument("--all-chapters", action="store_true", help="Generate all chapters in the book sequentially")
     parser.add_argument("--list-chapters", action="store_true", help="List all detected chapters and word counts in the book")
     parser.add_argument("--list-books", action="store_true", help="List all books available in books/ catalog")
+    parser.add_argument("--research-book", action="store_true", help="Conduct deep pedagogical research and generate books/<slug>/deeper-research-report.md")
     parser.add_argument("--duration", type=int, default=30, help="Target duration in minutes (default: 30)")
     parser.add_argument("--engine", type=str, default="edge", choices=["gemini", "edge"], help="TTS engine ('gemini' or 'edge')")
     parser.add_argument("--voice", type=str, default="en-NG-AbeoNeural", help="Voice name (default: en-NG-AbeoNeural for Nigerian English Male, or en-NG-EzinneNeural for Female)")
@@ -664,6 +748,12 @@ def main():
     print(f"Source: {book_file}")
     print(f"Slug:   {metadata.slug}")
     print(f"=======================================================")
+
+    # 1b. Deep Pedagogical Research Mode
+    if args.research_book:
+        client = get_gemini_client()
+        research_book_blueprint(client, book_file, metadata)
+        return
 
     # 2. List Chapters Mode
     if args.list_chapters:
