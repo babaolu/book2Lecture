@@ -120,7 +120,7 @@ pip install -r requirements.txt
 ```
 
 ### 3. Configure Gemini API Key
-Export your Gemini API key in your shell environment:
+Export your Gemini API key in your shell environment (required for autonomous textbook parsing, deeper research blueprints, multimodal vision OCR, and knowledge graph extraction; optional only when synthesizing pre-existing `--script-file` JSONs):
 ```bash
 export GEMINI_API_KEY="your-gemini-api-key-here"
 ```
