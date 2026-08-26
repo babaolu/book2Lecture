@@ -319,24 +319,20 @@ class UniversalBookParser:
                             (ocr_cache_dir / f"page_{other_idx+1:04d}.md").write_text("", encoding="utf-8")
 
                 except Exception as ex:
-                    print(f"[Smart Ingestion - Gemini OCR Note] {ex}")
-                    print(f"[Smart Ingestion - Local RapidOCR] Switching to local offline RapidOCR engine for remaining scanned pages...")
+                    print(f"[Smart Ingestion - Cloud OCR Note] {ex}")
+                    print(f"[Smart Ingestion - Local OCR Microservice] Delegating remaining pages to OCR Microservice (http://127.0.0.1:8088)...")
                     try:
-                        from rapidocr_onnxruntime import RapidOCR
-                        local_ocr = RapidOCR()
+                        from services.ocr_client import OCRServiceClient
+                        ocr_client = OCRServiceClient()
+                        ocr_client.ensure_daemon_running()
                         for p_idx in uncached_scans:
                             if page_markdowns[p_idx] is None:
-                                page = doc[p_idx]
-                                pix = page.get_pixmap(dpi=200)
-                                img_bytes = pix.tobytes("png")
-                                result, _ = local_ocr(img_bytes)
-                                lines = [item[1] for item in result] if result else []
-                                page_text = "\n".join(lines)
+                                page_text = ocr_client.transcribe_pdf_page(file_path, page_index=p_idx, dpi=180)
                                 page_markdowns[p_idx] = page_text
                                 (ocr_cache_dir / f"page_{p_idx+1:04d}.md").write_text(page_text, encoding="utf-8")
-                                print(f"  • [RapidOCR] Processed page {p_idx+1}/{total_pages} ({len(page_text)} chars)")
+                                print(f"  • [OCR Microservice] Transcribed page {p_idx+1}/{total_pages} ({len(page_text)} chars)")
                     except Exception as local_ex:
-                        print(f"[Smart Ingestion - RapidOCR Note] {local_ex}")
+                        print(f"[Smart Ingestion - OCR Microservice Error] {local_ex}")
                         for p_idx in uncached_scans:
                             if page_markdowns[p_idx] is None:
                                 page_markdowns[p_idx] = doc[p_idx].get_text() or ""
