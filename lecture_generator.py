@@ -71,10 +71,10 @@ def resolve_book(book_arg: Optional[str]) -> Tuple[Path, BookMetadata]:
                 for candidate in ["book.md", "book.pdf", "book.docx", "book.doc", "book.epub", "book.txt"]:
                     if (target / candidate).exists():
                         return target / candidate, BookMetadata(target / candidate, cfg)
-                # Look for any supported file in the dir
+                # Look for any supported file in the dir (excluding research blueprints and cache files)
                 for ext in supported_exts:
                     for candidate in target.glob(f"*{ext}"):
-                        if not candidate.name.endswith(".extracted.md") and not candidate.name.endswith(".extracted.txt"):
+                        if candidate.name != "deeper-research-report.md" and not candidate.name.endswith(".extracted.md") and not candidate.name.endswith(".extracted.txt"):
                             return candidate, BookMetadata(candidate, cfg)
             else:
                 cfg_file = target.parent / "book_config.json"
@@ -319,11 +319,27 @@ class UniversalBookParser:
                             (ocr_cache_dir / f"page_{other_idx+1:04d}.md").write_text("", encoding="utf-8")
 
                 except Exception as ex:
-                    print(f"[Smart Ingestion - Checkpoint Saved] Note: {ex}")
-                    print(f"[Smart Ingestion - Checkpoint Saved] All completed pages are safely saved to {ocr_cache_dir}. You can resume anytime without repeating work.")
-                    for p_idx in uncached_scans:
-                        if page_markdowns[p_idx] is None:
-                            page_markdowns[p_idx] = doc[p_idx].get_text() or ""
+                    print(f"[Smart Ingestion - Gemini OCR Note] {ex}")
+                    print(f"[Smart Ingestion - Local RapidOCR] Switching to local offline RapidOCR engine for remaining scanned pages...")
+                    try:
+                        from rapidocr_onnxruntime import RapidOCR
+                        local_ocr = RapidOCR()
+                        for p_idx in uncached_scans:
+                            if page_markdowns[p_idx] is None:
+                                page = doc[p_idx]
+                                pix = page.get_pixmap(dpi=200)
+                                img_bytes = pix.tobytes("png")
+                                result, _ = local_ocr(img_bytes)
+                                lines = [item[1] for item in result] if result else []
+                                page_text = "\n".join(lines)
+                                page_markdowns[p_idx] = page_text
+                                (ocr_cache_dir / f"page_{p_idx+1:04d}.md").write_text(page_text, encoding="utf-8")
+                                print(f"  • [RapidOCR] Processed page {p_idx+1}/{total_pages} ({len(page_text)} chars)")
+                    except Exception as local_ex:
+                        print(f"[Smart Ingestion - RapidOCR Note] {local_ex}")
+                        for p_idx in uncached_scans:
+                            if page_markdowns[p_idx] is None:
+                                page_markdowns[p_idx] = doc[p_idx].get_text() or ""
 
             # Step 3: Assemble all available pages into book.md
             full_markdown = "\n\n".join([m for m in page_markdowns if m and m.strip()])
@@ -1028,7 +1044,7 @@ def build_lecture_audio(
 ) -> Path:
     """Builds complete audio track by synthesizing speech segments and inserting silent pauses."""
     combined_audio = AudioSegment.silent(duration=500)
-    segments = script_data.get("segments", [])
+    segments = script_data.get("segments") or script_data.get("blocks") or []
     total_segments = len(segments)
 
     print(f"Synthesizing audio for {total_segments} script blocks (Engine: {engine.upper()}, Voice: {voice_name}, Rate: {rate})...")
@@ -1039,7 +1055,7 @@ def build_lecture_audio(
             text = seg.get("text", "").strip()
             if not text:
                 continue
-            label = seg.get("section_label", "Speech")
+            label = seg.get("section_label") or seg.get("section") or "Speech"
             print(f"  [{idx}/{total_segments}] Synthesizing ({label}): {text[:50]}...")
             
             if engine == "gemini":
@@ -1070,15 +1086,16 @@ def save_transcript_markdown(script_data: dict, output_md_path: Path):
     """Saves formatted lecture transcript and study guide."""
     lines = [
         f"# Audio Masterclass: {script_data.get('title', 'Chapter Masterclass')}",
-        f"**Chapter:** {script_data.get('chapter_number')}  ",
+        f"**Chapter:** {script_data.get('chapter') or script_data.get('chapter_number')}  ",
         f"**Estimated Duration:** ~{script_data.get('estimated_duration_mins')} minutes  ",
         "\n---\n",
         "## Masterclass Script & Interactive Checkpoints\n"
     ]
 
-    for seg in script_data.get("segments", []):
+    segments = script_data.get("segments") or script_data.get("blocks") or []
+    for seg in segments:
         if seg.get("type") == "speech":
-            label = seg.get("section_label", "Masterclass")
+            label = seg.get("section_label") or seg.get("section") or "Masterclass"
             lines.append(f"**[{label}]**  ")
             lines.append(f"{seg.get('text')}\n")
         elif seg.get("type") == "pause":
@@ -1123,6 +1140,7 @@ def main():
     parser.add_argument("--research-book", action="store_true", help="Conduct deep pedagogical research and generate books/<slug>/deeper-research-report.md")
     parser.add_argument("--index-book", action="store_true", help="Index all chapters of this book into the Graphify knowledge graph")
     parser.add_argument("--sync-graph", action="store_true", help="Rebuild graph clusters and export graph.html")
+    parser.add_argument("--model", type=str, default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"), help="Gemini model name (default: gemini-2.5-flash or gemini-3.7-flash)")
     parser.add_argument("--duration", type=int, default=30, help="Target duration in minutes (default: 30)")
     parser.add_argument("--engine", type=str, default="edge", choices=["gemini", "edge"], help="TTS engine ('gemini' or 'edge')")
     parser.add_argument("--voice", type=str, default="en-NG-AbeoNeural", help="Voice name (default: en-NG-AbeoNeural for Nigerian English Male, or en-NG-EzinneNeural for Female)")
