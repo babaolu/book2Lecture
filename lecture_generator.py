@@ -55,8 +55,9 @@ class BookMetadata:
 
 
 def resolve_book(book_arg: Optional[str]) -> Tuple[Path, BookMetadata]:
-    """Resolves a book argument into a file path and metadata."""
+    """Resolves a book argument into a file path and metadata, supporting .md, .pdf, .docx, .doc, .epub, .txt."""
     books_dir = Path("books")
+    supported_exts = [".md", ".pdf", ".docx", ".doc", ".epub", ".txt"]
     
     # 1. Check if argument is a path to a file or directory
     if book_arg:
@@ -65,15 +66,15 @@ def resolve_book(book_arg: Optional[str]) -> Tuple[Path, BookMetadata]:
             if target.is_dir():
                 cfg_file = target / "book_config.json"
                 cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
-                # Look for book.md or book.pdf
-                for candidate in ["book.md", "book.pdf", "book.txt"]:
+                # Look for standard named book files
+                for candidate in ["book.md", "book.pdf", "book.docx", "book.doc", "book.epub", "book.txt"]:
                     if (target / candidate).exists():
                         return target / candidate, BookMetadata(target / candidate, cfg)
-                # Look for any .md or .pdf in the dir
-                for candidate in target.glob("*.md"):
-                    return candidate, BookMetadata(candidate, cfg)
-                for candidate in target.glob("*.pdf"):
-                    return candidate, BookMetadata(candidate, cfg)
+                # Look for any supported file in the dir
+                for ext in supported_exts:
+                    for candidate in target.glob(f"*{ext}"):
+                        if not candidate.name.endswith(".extracted.md") and not candidate.name.endswith(".extracted.txt"):
+                            return candidate, BookMetadata(candidate, cfg)
             else:
                 cfg_file = target.parent / "book_config.json"
                 cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
@@ -83,42 +84,48 @@ def resolve_book(book_arg: Optional[str]) -> Tuple[Path, BookMetadata]:
         if (books_dir / book_arg).exists():
             return resolve_book(str(books_dir / book_arg))
 
-    # 2. Default fallback: search books/ directory or workspace root
+    # 2. Default fallback: search books/ directory
     if books_dir.exists():
-        for b_dir in books_dir.iterdir():
-            if b_dir.is_dir():
+        for b_dir in sorted(books_dir.iterdir()):
+            if b_dir.is_dir() and b_dir.name != "sample_book":
                 return resolve_book(str(b_dir))
 
-    # 3. Fallback to any markdown or PDF in workspace
-    for p in Path(".").glob("*.md"):
-        if "deep-research" not in p.name.lower() and "transcript" not in p.name.lower():
-            return p, BookMetadata(p)
+    # 3. Fallback to any supported document in workspace
+    for ext in supported_exts:
+        for p in Path(".").glob(f"*{ext}"):
+            if "deep-research" not in p.name.lower() and "transcript" not in p.name.lower() and not p.name.startswith("."):
+                return p, BookMetadata(p)
             
     raise FileNotFoundError(f"Could not find book matching '{book_arg}'. Check your path or books/ directory.")
 
 
 # ============================================================================
-# 2. UNIVERSAL BOOK PARSER (.MD & .PDF)
+# 2. UNIVERSAL MULTI-FORMAT BOOK PARSER (.MD, .PDF, .DOCX, .DOC, .EPUB, .TXT)
 # ============================================================================
 
 class UniversalBookParser:
-    """Extracts text and parses chapters from Markdown, PDF, and Text files."""
+    """Extracts text and parses chapters from Markdown, PDF, DOCX, DOC, EPUB, and Text files."""
 
     @classmethod
     def extract_full_text(cls, file_path: Path) -> str:
         """
-        Extracts complete text content from .md, .txt, or .pdf with auto-caching.
-        For PDFs: Uses a Hybrid Ingestion Pipeline:
-        1. Fast local Markdown extraction via pymupdf4llm (0 API tokens).
-        2. Heuristic density check per page (detecting scans/handwritten notes).
-        3. Targeted Gemini Vision OCR for low-density/scanned pages.
-        4. Auto-caches output to books/<slug>/book.md or .extracted.md.
+        Extracts complete text content from any supported format into structured Markdown.
+        Supported: .md, .txt, .pdf, .docx, .doc, .epub
+        Features:
+        - .docx: Converted to semantic Markdown via mammoth (tables, headers, bold, lists).
+        - .doc: Converted via headless LibreOffice -> mammoth.
+        - .epub: Converted via ebooklib + html2text.
+        - .pdf: Hybrid pymupdf4llm + Targeted Gemini Vision OCR.
+        - Auto-caches structured Markdown to books/<slug>/book.md or <file>.extracted.md.
         """
         suffix = file_path.suffix.lower()
+        
+        # 1. Plain Text & Markdown
         if suffix in [".md", ".txt"]:
             return file_path.read_text(encoding="utf-8")
-        elif suffix == ".pdf":
-            # 1. Check if cached markdown/text exists
+            
+        # 2. Microsoft Word (.docx)
+        elif suffix == ".docx":
             cache_md = file_path.with_suffix(".extracted.md")
             book_md = file_path.parent / "book.md"
             if book_md.exists():
@@ -126,7 +133,96 @@ class UniversalBookParser:
             if cache_md.exists():
                 return cache_md.read_text(encoding="utf-8")
 
-            # 2. Hybrid pymupdf4llm + Vision OCR Pipeline
+            print(f"\n[Smart Ingestion] Converting Word document (.docx) to Markdown: {file_path.name}...")
+            import mammoth
+            with open(str(file_path), "rb") as docx_file:
+                result = mammoth.convert_to_markdown(docx_file)
+                md_text = result.value
+            
+            cache_md.write_text(md_text, encoding="utf-8")
+            if not book_md.exists():
+                book_md.write_text(md_text, encoding="utf-8")
+            print(f"[Smart Ingestion] Successfully converted .docx to Markdown: {cache_md} ({len(md_text):,} chars)")
+            return md_text
+
+        # 3. Legacy Microsoft Word (.doc)
+        elif suffix == ".doc":
+            cache_md = file_path.with_suffix(".extracted.md")
+            book_md = file_path.parent / "book.md"
+            if book_md.exists():
+                return book_md.read_text(encoding="utf-8")
+            if cache_md.exists():
+                return cache_md.read_text(encoding="utf-8")
+
+            print(f"\n[Smart Ingestion] Converting legacy Word document (.doc) to Markdown: {file_path.name}...")
+            import subprocess
+            import tempfile
+            import mammoth
+            
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                subprocess.run([
+                    "libreoffice", "--headless", "--convert-to", "docx",
+                    str(file_path), "--outdir", tmp_dir
+                ], check=True, capture_output=True)
+                
+                tmp_docx = Path(tmp_dir) / file_path.with_suffix(".docx").name
+                if tmp_docx.exists():
+                    with open(str(tmp_docx), "rb") as docx_file:
+                        result = mammoth.convert_to_markdown(docx_file)
+                        md_text = result.value
+                else:
+                    raise RuntimeError(f"Failed to convert {file_path.name} to .docx via LibreOffice")
+
+            cache_md.write_text(md_text, encoding="utf-8")
+            if not book_md.exists():
+                book_md.write_text(md_text, encoding="utf-8")
+            print(f"[Smart Ingestion] Successfully converted .doc to Markdown: {cache_md} ({len(md_text):,} chars)")
+            return md_text
+
+        # 4. EPUB eBooks (.epub)
+        elif suffix == ".epub":
+            cache_md = file_path.with_suffix(".extracted.md")
+            book_md = file_path.parent / "book.md"
+            if book_md.exists():
+                return book_md.read_text(encoding="utf-8")
+            if cache_md.exists():
+                return cache_md.read_text(encoding="utf-8")
+
+            print(f"\n[Smart Ingestion] Converting EPUB eBook to Markdown: {file_path.name}...")
+            import ebooklib
+            from ebooklib import epub
+            import html2text
+
+            book = epub.read_epub(str(file_path))
+            converter = html2text.HTML2Text()
+            converter.ignore_links = False
+            converter.body_width = 0
+            converter.ignore_images = False
+
+            chapters_md = []
+            for item in book.get_items():
+                if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                    html_content = item.get_content().decode("utf-8", errors="ignore")
+                    md_chunk = converter.handle(html_content).strip()
+                    if md_chunk and len(md_chunk) > 50:
+                        chapters_md.append(md_chunk)
+
+            full_md = "\n\n---\n\n".join(chapters_md)
+            cache_md.write_text(full_md, encoding="utf-8")
+            if not book_md.exists():
+                book_md.write_text(full_md, encoding="utf-8")
+            print(f"[Smart Ingestion] Successfully converted .epub to Markdown: {cache_md} ({len(full_md):,} chars)")
+            return full_md
+
+        # 5. PDF Books (.pdf) via Hybrid pymupdf4llm + Vision OCR
+        elif suffix == ".pdf":
+            cache_md = file_path.with_suffix(".extracted.md")
+            book_md = file_path.parent / "book.md"
+            if book_md.exists():
+                return book_md.read_text(encoding="utf-8")
+            if cache_md.exists():
+                return cache_md.read_text(encoding="utf-8")
+
             print(f"\n[Smart Ingestion] Ingesting PDF via pymupdf4llm: {file_path.name}...")
             import fitz  # PyMuPDF
             import pymupdf4llm
@@ -145,13 +241,10 @@ class UniversalBookParser:
                 p_text = page.get_text() or ""
                 images = page.get_images()
                 
-                # Check if page is predominantly a scanned image or handwritten note
-                # (low text length < 100 chars, but has embedded images)
                 if len(p_text.strip()) < 100 and len(images) > 0:
                     scanned_page_indices.append(p_idx)
-                    page_markdowns.append(None)  # Placeholder for Vision OCR
+                    page_markdowns.append(None)
                 else:
-                    # Native digital page: extract via pymupdf4llm
                     try:
                         p_md = pymupdf4llm.to_markdown(doc, pages=[p_idx])
                         page_markdowns.append(p_md)
@@ -160,7 +253,7 @@ class UniversalBookParser:
 
             print(f"[Smart Ingestion] Digital Text Pages: {total_pages - len(scanned_page_indices)} | Scanned/Image Pages: {len(scanned_page_indices)}")
 
-            # 3. Targeted Gemini Vision OCR for Scanned Pages (if any)
+            # Targeted Gemini Vision OCR for Scanned Pages
             if scanned_page_indices:
                 print(f"[Smart Ingestion - Vision OCR] Running targeted Gemini Vision OCR for {len(scanned_page_indices)} scanned pages...")
                 try:
@@ -169,8 +262,6 @@ class UniversalBookParser:
                     import io
 
                     pypdf_reader = pypdf.PdfReader(str(file_path))
-
-                    # Process scanned pages in batches of up to 6 pages to preserve context and rate limits
                     batch_size = 6
                     for i in range(0, len(scanned_page_indices), batch_size):
                         batch_indices = scanned_page_indices[i:i + batch_size]
@@ -201,14 +292,13 @@ class UniversalBookParser:
                         ocr_result = resp.text.strip()
                         page_markdowns[batch_indices[0]] = ocr_result
                         for other_idx in batch_indices[1:]:
-                            page_markdowns[other_idx] = "" # Handled in batch result
+                            page_markdowns[other_idx] = ""
                 except Exception as ex:
                     print(f"[Smart Ingestion - Warning] Vision OCR fallback encountered note: {ex}")
                     for p_idx in scanned_page_indices:
                         if page_markdowns[p_idx] is None:
                             page_markdowns[p_idx] = doc[p_idx].get_text() or ""
 
-            # 4. Assemble complete markdown and cache
             full_markdown = "\n\n".join([m for m in page_markdowns if m])
             try:
                 cache_md.write_text(full_markdown, encoding="utf-8")
@@ -220,7 +310,7 @@ class UniversalBookParser:
 
             return full_markdown
         else:
-            raise ValueError(f"Unsupported book format: {suffix}. Supported: .md, .txt, .pdf")
+            raise ValueError(f"Unsupported book format: '{suffix}'. Supported formats: .md, .txt, .pdf, .docx, .doc, .epub")
 
     @classmethod
     def parse_chapters(cls, file_path: Path) -> List[Dict]:
