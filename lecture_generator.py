@@ -1214,7 +1214,7 @@ def main():
             print(f"Stage 1: Generating Uncompressed Pedagogical Script with Gemini Flash...")
             script_data = generate_pedagogical_script_gemini(client, chapter_data, metadata, target_duration_mins=args.duration, graph_context=graph_context)
             
-            script_json_path = out_base / f"chapter_{ch_num}_script.json"
+            script_json_path = out_base / f"{metadata.slug}_chapter_{ch_num}_script.json"
             script_json_path.write_text(json.dumps(script_data, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"Script saved to {script_json_path}")
 
@@ -1226,12 +1226,12 @@ def main():
                 print(f"  (Uncovered sample: {', '.join(val['missing_sample'])})")
 
         # 6. Save Transcript
-        transcript_path = out_base / f"chapter_{ch_num}_transcript.md"
+        transcript_path = out_base / f"{metadata.slug}_chapter_{ch_num}_transcript.md"
         save_transcript_markdown(script_data, transcript_path)
 
         # 7. Synthesize Audio
         print(f"\nStage 2: Synthesizing Audio (Voice: {args.voice}, Rate: {args.rate})...")
-        audio_path = out_base / f"chapter_{ch_num}_lecture.mp3"
+        audio_path = out_base / f"{metadata.slug}_chapter_{ch_num}_lecture.mp3"
         client = get_gemini_client() if args.engine == "gemini" else None
         build_lecture_audio(client, script_data, audio_path, engine=args.engine, voice_name=args.voice, rate=args.rate)
 
