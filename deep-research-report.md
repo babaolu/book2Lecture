@@ -1,47 +1,40 @@
 # Universal Pedagogical Architecture: Spoken Masterclasses for Professional Textbooks
 
 ## Executive Summary  
-This report provides a universal, research-backed framework for converting academic textbooks and professional study packs (`.pdf`, `.md`, `.txt`) into **engaging, conversational, unhurried audio masterclasses**. It serves as the **Global Pedagogical Constitution** for the `book2Lecture` engine. It establishes the active target textbook—resolved dynamically per book—as the primary source of truth.
+This report provides a universal, research-backed framework for converting academic textbooks and professional study packs (`.pdf`, `.md`, `.txt`) into **engaging, conversational, unhurried, and fully comprehensive audio masterclasses**. It serves as the **Global Pedagogical Constitution** for the `book2Lecture` engine. It establishes the active target textbook—resolved dynamically per book—as the primary source of truth.
 
 It details how to extract learning objectives, apply cognitive load theory to spoken audio, calibrate speech delivery (100–110 WPM with natural accents), embed distributed active recall with reflection pauses, insert modular study break checkpoints, and adapt spoken teaching techniques across diverse academic disciplines (quantitative statistics, conceptual management, legal statutes, and procedural workflows).
 
 ## The Two-Tier Pedagogical Architecture
 The system operates on a dual-layer intelligence structure:
-1. **The Global Constitution (`deep-research-report.md`):** Universal laws of audio learning science, working memory pacing, distributed retrieval practice, and synthesis layers that apply to every book.
-2. **The Book-Specific Blueprint (`books/<slug>/deeper-research-report.md`):** A specialized deep research dossier generated for each specific textbook, detailing subject-specific cognitive hurdles (e.g., math anxiety), spoken formula translation rules, case precedent frameworks, and curriculum prerequisite maps.
+1. **The Global Constitution (`deep-research-report.md`):** Universal laws of audio learning science, working memory pacing, distributed retrieval practice, non-negotiable duration and completeness rules, and synthesis layers that apply to every book.
+2. **The Book-Specific Blueprint (`books/<slug>/deeper-research-report.md`):** A specialized deep research dossier generated for each specific textbook, detailing subject-specific cognitive hurdles (e.g., math anxiety), spoken formula translation rules, case precedent frameworks, curriculum prerequisite maps, and chapter structural breakdowns.
 
-## Core Directives: Source Fidelity, Depth & Audio-Masterclass Architecture
-All scripting and speech synthesis must adhere to these seven immutable core directives:
+## Non-Negotiable Universal Laws of the Masterclass Engine
+All scripting and speech synthesis across all books (current and future) must strictly adhere to these seven immutable core directives:
 
-1. **Active Textbook as the Primary Source of Truth:**
-   - The primary source of truth is the active target textbook loaded from `books/<slug>/` (defined in `book_config.json`).
-   - Scripts must strictly mirror the target textbook’s chapter sequence, section headings, specialized definitions, exam justifications, and syllabus terminology.
-   - Maintain the required level of detail so candidates are fully prepared for exam-style questions, case studies, and multiple-choice questions (MCQs).
+1. **Zero Artificial Duration Limits (No Arbitrary Truncation or Compression):**
+   - **Audio duration is completely unconstrained.** A masterclass must run as long as required for 100% textbook coverage (whether 1 hour, 2.5 hours, 5 hours, 10 hours, or 20 hours).
+   - Never summarize, drop subsections, or compress away granular textbook details to meet an artificial time ceiling. If an unhurried, exhaustive teaching of a chapter takes 3 hours at 100–110 WPM, it must be allowed to run its full natural duration.
 
-2. **Process and Explain Deeply, Never Merely Summarize:**
-   - Do not simply read the textbook verbatim or reduce rich explanations into dry, brief bullet summaries.
-   - **Tiered Depth Rule:** Explain difficult or examinable concepts deeply with concrete workplace scenarios and why-it-works logic. Compress straightforward lists efficiently without omitting any syllabus terms.
-   - Never omit examinable categories, formulas, or classifications.
+2. **One Chapter = One Unified Masterclass Audio File:**
+   - Every chapter must always be completely contained within **one single, unified audio file** (`output_lectures/<slug>/chapter_N_lecture.mp3`). Never fragment a chapter into multiple disjointed audio files.
 
-3. **Uncompressed Duration & Modular Study Break Architecture:**
-   - Do not artificially compress or rush a chapter to fit an arbitrary 10–13 minute window if doing so strips out syllabus depth.
-   - A thorough, comprehensive chapter lecture may run **15 to 45 minutes** as dictated by subject complexity.
-   - To prevent listener fatigue and support cognitive chunking, embed **Modular Study Break Checkpoints** (2 to 3 per long lecture). At each checkpoint, provide a natural transition inviting the listener to pause, review notes, or continue:
+3. **Cognitive Chunking via Embedded Modular Study Breaks & Active Recall:**
+   - To manage working memory load during long masterclasses, the audio utilizes **frequent, embedded modular study breaks (5–10 second pauses)** and **active recall checkpoints (4-second reflection pauses)** inserted naturally every 10–15 minutes.
+   - These provide clear milestones for listeners to pause, digest, take notes, or resume later without breaking pedagogical continuity:
      > *"Take a quick breath here. If you want to pause your audio and review your notes on these core principles, this is Study Checkpoint 1. Whenever you're ready, let's continue with Section X..."*
 
-4. **Distributed Active Recall Throughout:**
-   - Do not bunch all questions at the end. Intersperse retrieval practice throughout the entire lesson:
-     > **Concept $\to$ Nuance & Scenario $\to$ Active Recall Question $\to$ 4-Second Reflection Pause $\to$ Answer & Takeaway $\to$ Continue.**
+4. **Uncompromised Deep-Dive Pedagogical Mental Models:**
+   - Rich narrative frameworks—such as *The Three-Legged Stool of Enterprise*, *Salomon v Salomon*, *The Business Failure Iceberg*, *The Stakeholder Spiderweb*, *Spoken Formula Intuition*, and *Workplace Scenario Diagnostics*—are performing as intended and **must never be compromised, rushed, or diluted**. They are the primary vehicle for long-term conceptual assimilation.
 
-5. **Calibrated Spoken Delivery (100–110 WPM):**
+5. **100% Granular Content Fidelity & Linear Syllabus Completeness:**
+   - The active target textbook loaded from `books/<slug>/` is the primary source of truth.
+   - Every single heading, sub-heading, author quote, theoretical definition, industrial category, functional area, classification table, legal distinction, feasibility component, and practice MCQ from the textbook must be fully unpacked and taught.
+   - Maintain exhaustive depth so candidates are 100% prepared for university exams, professional body certifications (e.g. CIPM, ICAN), case studies, and multiple-choice questions.
+
+6. **Calibrated Spoken Delivery (100–110 WPM):**
    - Spoken audio must be calibrated to **100–110 Words Per Minute** using natural, clear neural voices (`en-NG-AbeoNeural` / `en-NG-EzinneNeural`), ensuring optimal acoustic assimilation for complex academic material.
-
-6. **Domain-Adaptive Teaching Modalities:**
-   - The engine automatically activates specialized spoken techniques based on the subject matter:
-     - **Modality A (Quantitative & Statistical):** *Spoken Formula Intuition*—explain the conceptual logic of mathematical equations in plain words before computing; walk through simple numerical examples step by step.
-     - **Modality B (Conceptual & Management):** *Scenario-Driven Diagnostics*—open with workplace conflicts, simulate organizational dialogues, and use spoken geometric imagery for networks and organograms.
-     - **Modality C (Legal & Regulatory):** *IRAC Case Law & Statutory Analysis*—structure legal principles around Issue, Rule, Application, and Conclusion.
-     - **Modality D (Procedural & Methodological):** *Sequential Lifecycle Walkthroughs*—step through operational research protocols and workflows.
 
 7. **Three-Layer Final Consolidation:**
    - **Layer 1:** Rapid chapter synthesis.
