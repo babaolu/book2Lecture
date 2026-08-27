@@ -402,8 +402,11 @@ class UniversalBookParser:
                 # Convert string / Roman numeral / word to integer
                 if ch_num_raw.isdigit():
                     ch_num = int(ch_num_raw)
+                elif ch_num_raw.lower() in word_to_num:
+                    ch_num = word_to_num[ch_num_raw.lower()]
                 else:
-                    ch_num = word_to_num.get(ch_num_raw.lower(), idx + 1)
+                    # Ignore false matches like "Unit demand" or "Unit of Labour"
+                    continue
 
                 start_pos = match.start()
                 end_pos = unique_matches[idx + 1].start() if idx + 1 < len(unique_matches) else len(full_text)
