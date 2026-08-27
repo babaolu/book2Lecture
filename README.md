@@ -79,9 +79,9 @@ book2Lecture/
 ├── output_lectures/                           # Scoped outputs per book (Ignored by git)
 │   ├── .gitkeep
 │   └── <book_slug>/
-│       ├── chapter_1_lecture.mp3              # High-bitrate Masterclass Audio (100–110 WPM)
-│       ├── chapter_1_transcript.md           # Synchronized Study Transcript
-│       └── chapter_1_script.json             # Structured Masterclass Script
+│       ├── <book_slug>_chapter_1_lecture.mp3  # High-bitrate Masterclass Audio (100–110 WPM)
+│       ├── <book_slug>_chapter_1_transcript.md # Synchronized Study Transcript
+│       └── <book_slug>_chapter_1_script.json  # Structured Masterclass Script
 │
 ├── graphify-out/                              # Knowledge Graph Output (HTML & JSON)
 │   ├── graph.html                             # Interactive in-browser Knowledge Graph
